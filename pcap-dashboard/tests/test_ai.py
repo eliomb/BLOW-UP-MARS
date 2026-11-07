@@ -1,4 +1,4 @@
-"""Dependency-free regression tests: offline mock of LM Studio API and metadata extraction."""
+"""Dependency-free offline tests for both AI providers and metadata extraction."""
 import http.server
 import json
 import os
@@ -44,7 +44,7 @@ class Tests(unittest.TestCase):
         srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Model)
         thread = threading.Thread(target=srv.serve_forever, daemon=True); thread.start()
         try:
-            env = {'LM_STUDIO_HOST':'127.0.0.1', 'LM_STUDIO_PORT':str(srv.server_port), 'LM_STUDIO_MODEL':'mock-model'}
+            env = {'AI_PROVIDER':'lmstudio', 'LM_STUDIO_HOST':'127.0.0.1', 'LM_STUDIO_PORT':str(srv.server_port), 'LM_STUDIO_MODEL':'mock-model'}
             with patch.dict(os.environ, env):
                 r = ai.analyze(ai.observe(PACKETS))
             self.assertEqual(r['findings'][0]['category'], 'suspicious')
@@ -71,7 +71,7 @@ class Tests(unittest.TestCase):
         srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), ChatModel)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
-            with patch.dict(os.environ, {'LM_STUDIO_HOST':'127.0.0.1', 'LM_STUDIO_PORT':str(srv.server_port), 'LM_STUDIO_MODEL':'mock-model'}):
+            with patch.dict(os.environ, {'AI_PROVIDER':'lmstudio', 'LM_STUDIO_HOST':'127.0.0.1', 'LM_STUDIO_PORT':str(srv.server_port), 'LM_STUDIO_MODEL':'mock-model'}):
                 result = ai.ask(ai.observe(PACKETS), 'Any sign of a scan?', [{'role':'user','content':'Earlier question'}, {'role':'assistant','content':'Earlier answer'}])
             self.assertIn('20 SYN', result)
         finally: srv.shutdown(); srv.server_close()
@@ -85,16 +85,55 @@ class Tests(unittest.TestCase):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
             # A server that accepted a request but does not reply in time is a gateway timeout.
-            with patch.dict(os.environ, {'LM_STUDIO_HOST':'127.0.0.1','LM_STUDIO_PORT':str(srv.server_port), 'LM_STUDIO_TIMEOUT':'10'}):
+            with patch.dict(os.environ, {'AI_PROVIDER':'lmstudio', 'LM_STUDIO_HOST':'127.0.0.1','LM_STUDIO_PORT':str(srv.server_port), 'LM_STUDIO_TIMEOUT':'10'}):
                 with patch('ai.urllib.request.build_opener') as factory:
                     import socket
                     factory.return_value.open.side_effect = socket.timeout('timed out')
                     with self.assertRaises(ai.ModelTimeout): ai.ask(ai.observe(PACKETS), 'What happened?')
         finally: srv.shutdown(); srv.server_close()
+    def test_mistral_config_without_key(self):
+        with patch.dict(os.environ, {'AI_PROVIDER':'mistral', 'MISTRAL_API_KEY':'',
+                                      'MISTRAL_MODEL':'ministral-8b-latest'}):
+            cfg = ai.config()
+            self.assertEqual(cfg['endpoint'], 'https://api.mistral.ai/v1/chat/completions')
+            self.assertEqual(cfg['provider'], 'mistral')
+            self.assertFalse(cfg['configured'])
+            with self.assertRaisesRegex(ValueError, 'MISTRAL_API_KEY'):
+                ai.ask(ai.observe(PACKETS), 'What happened?')
+
+    def test_mistral_uses_https_and_bearer_server_side(self):
+        from unittest.mock import MagicMock
+        payload = json.dumps({'choices':[{'message':{'content':'These SYNs might indicate scanning.'}}]}).encode()
+        response = MagicMock()
+        response.read.return_value = payload
+        response.__enter__.return_value = response
+        with patch.dict(os.environ, {'AI_PROVIDER':'mistral', 'MISTRAL_API_KEY':'only-for-tests',
+                                     'MISTRAL_MODEL':'ministral-8b-latest'}):
+            with patch('ai.urllib.request.build_opener') as factory:
+                factory.return_value.open.return_value = response
+                answer = ai.ask(ai.observe(PACKETS), 'Is there scanning?')
+            self.assertIn('SYNs', answer)
+            req = factory.return_value.open.call_args.args[0]
+            self.assertEqual(req.full_url, 'https://api.mistral.ai/v1/chat/completions')
+            self.assertEqual(req.get_header('Authorization'), 'Bearer only-for-tests')
+            sent = json.loads(req.data)
+            self.assertEqual(sent['model'], 'ministral-8b-latest')
+            self.assertNotIn('password SECRET', json.dumps(sent))
+
+    def test_mistral_http_429_is_rate_limited(self):
+        from io import BytesIO
+        from urllib.error import HTTPError
+        with patch.dict(os.environ, {'AI_PROVIDER':'mistral', 'MISTRAL_API_KEY':'only-for-tests'}):
+            with patch('ai.urllib.request.build_opener') as factory:
+                factory.return_value.open.side_effect = HTTPError(
+                    'https://api.mistral.ai/v1/chat/completions', 429, 'Too Many Requests', {}, BytesIO(b''))
+                with self.assertRaises(ai.ModelRateLimited):
+                    ai.ask(ai.observe(PACKETS), 'What happened?')
+
     def test_bad_config(self):
-        with patch.dict(os.environ, {'LM_STUDIO_HOST':'127.0.0.1@evil.com'}):
+        with patch.dict(os.environ, {'AI_PROVIDER':'lmstudio', 'LM_STUDIO_HOST':'127.0.0.1@evil.com'}):
             with self.assertRaises(ValueError): ai.config()
-        with patch.dict(os.environ, {'LM_STUDIO_PORT':'99999'}):
+        with patch.dict(os.environ, {'AI_PROVIDER':'lmstudio', 'LM_STUDIO_PORT':'99999'}):
             with self.assertRaises(ValueError): ai.config()
 
 if __name__ == '__main__': unittest.main()

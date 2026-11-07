@@ -100,8 +100,8 @@ async function poll() { try { const j = await api('/api/live/status?id=' + encod
 $('stop').onclick = () => post('/api/live/stop', { id: sid });
 $('again').onclick = async () => { if (live) await post('/api/live/stop', { id: sid }).catch(() => {}); location.reload(); };
 
-// ---- LM Studio AI: requests are initiated only by the user ----
-let aiReport = null, aiBusy = false, aiAvailable = false;
+// ---- AI (Mistral cloud or local LM Studio): user-initiated requests only ----
+let aiReport = null, aiBusy = false, aiAvailable = false, aiProvider = 'mistral';
 const aiStatus = (message, error = false) => { $('ai-status').textContent = message; $('ai-status').className = error ? 'bad' : ''; };
 function setAIWorking(busy) {
   aiBusy = busy;
@@ -119,8 +119,12 @@ function resetAI() {
 }
 async function aiConfiguration() {
   try { const c = await api('/api/ai/config');
-    $('ai-config').textContent = c.enabled ? `Configured: ${c.endpoint} · model: ${c.model} · timeout: ${c.timeout_seconds}s · only metadata aggregates, your questions and chat history are transmitted` : 'AI disabled by server administrator.';
-    aiAvailable = !!c.enabled;
+    aiProvider = c.provider;
+    const provider = c.provider === 'mistral' ? 'Mistral AI (cloud)' : 'LM Studio (local)';
+    if (!c.enabled) $('ai-config').textContent = 'AI disabled by server administrator.';
+    else if (!c.configured) $('ai-config').textContent = 'Mistral AI is selected, but MISTRAL_API_KEY is not set. Configure your .env file and recreate the container. Mistral API access may require billing activation.';
+    else $('ai-config').textContent = `${provider} · model: ${c.model} · timeout: ${c.timeout_seconds}s · ${c.provider === 'mistral' ? 'Your questions, recent chat, IPs and aggregated traffic metadata are sent to Mistral AI.' : 'Traffic metadata is sent to the configured local server.'}`;
+    aiAvailable = !!c.enabled && !!c.configured;
     setAIWorking(aiBusy);
   } catch (e) { aiAvailable = false; $('ai-config').textContent = 'AI configuration unavailable: ' + e.message; setAIWorking(false); }
 }
@@ -139,7 +143,7 @@ async function askAI(event) {
   $('ai-question').value = '';
   addChatMessage('user', question);
   setAIWorking(true);
-  aiStatus('Waiting for LM Studio to answer… Larger local models may need several minutes.');
+  aiStatus(aiProvider === 'mistral' ? 'Asking Mistral AI…' : 'Waiting for local LM Studio model…');
   try {
     const j = await post('/api/ai/ask', { id: sid, question });
     addChatMessage('assistant', j.answer);
@@ -181,7 +185,7 @@ function renderAI(report) {
 }
 async function runAI() {
   if (!sid || aiBusy || !aiAvailable) return;
-  setAIWorking(true); aiStatus('Generating optional report through LM Studio… This may take several minutes.');
+  setAIWorking(true); aiStatus(aiProvider === 'mistral' ? 'Generating optional report through Mistral AI…' : 'Generating optional report through LM Studio…');
   try {
     const j = await post('/api/ai/analyze', { id: sid });
     if (!j.report) throw new Error('No assessment returned');

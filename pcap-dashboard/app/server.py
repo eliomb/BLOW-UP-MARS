@@ -6,7 +6,6 @@ import nlq, pcap, ssh, ai
 MAX_UP = int(os.environ.get('MAX_UPLOAD_MB', '64')) * 2 ** 20
 TTL, MAX_SESS = 1800, 4
 SESS, LOCK = {}, threading.Lock()
-ALLOWED = set(os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,[::1]').split(','))
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 FILES = {k: (open(os.path.join(ROOT, f), 'rb').read(), t) for k, (f, t) in {
     '/': ('index.html', 'text/html; charset=utf-8'), '/app.css': ('app.css', 'text/css; charset=utf-8'),
@@ -45,9 +44,8 @@ class H(BaseHTTPRequestHandler):
         for k, v in SEC.items(): self.send_header(k, v)
         self.end_headers(); self.wfile.write(body)
 
-    def denied(self):  # DNS-rebinding + CSRF protection: SSH control must only be reachable from this page
+    def denied(self):  # No Host allowlist; retain same-origin and custom-header checks.
         h, o = self.headers.get('Host', ''), self.headers.get('Origin')
-        if h not in ALLOWED and h.rsplit(':', 1)[0] not in ALLOWED: return True
         if o and o not in ('http://' + h, 'https://' + h): return True
         return self.path.startswith('/api/') and self.headers.get('X-Requested-With') != 'wirelight'
 
@@ -63,6 +61,7 @@ class H(BaseHTTPRequestHandler):
         try: fn()
         except subprocess.TimeoutExpired: self.out(504, {'error': 'Timed out talking to the remote host'})
         except ai.ModelTimeout as e: self.out(504, {'error': str(e)})
+        except ai.ModelRateLimited as e: self.out(429, {'error': str(e)})
         except (ai.ModelUnavailable, ai.ModelBadResponse) as e: self.out(502, {'error': str(e)})
         except (ValueError, IndexError, KeyError) as e: self.out(400, {'error': str(e) or 'Bad request'})
         except Exception: self.out(500, {'error': 'Internal error'})
@@ -77,7 +76,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == '/api/keys': return self.out(200, {'keys': ssh.keys()})
         if u.path == '/api/ai/config':
             cfg = ai.config()
-            return self.out(200, {'enabled': cfg['enabled'], 'endpoint': f"{cfg['scheme']}://{cfg['host']}:{cfg['port']}",
+            return self.out(200, {'enabled': cfg['enabled'], 'configured': cfg['configured'],
+                                  'provider': cfg['provider'], 'endpoint': cfg['endpoint'],
                                   'model': cfg['model'], 'timeout_seconds': cfg['timeout']})
         s = session(q.get('id', ''))
         if not s: return self.out(404, {'error': 'Session expired. Start again.'})

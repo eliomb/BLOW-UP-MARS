@@ -5,7 +5,7 @@ Upload a `.pcap` / `.pcapng` file, see summary stats, and filter packets with pl
 ## Run
 ```bash
 docker compose up --build
-# open http://localhost:8080
+# open http://localhost:8080 (or http://<your-Docker-host-LAN-IP>:8080 if enabled)
 ```
 Stop with `docker compose down`. Or without Compose:
 ```bash
@@ -40,38 +40,57 @@ Remote requirements: Linux with `tcpdump`, and either an SSH user that is root, 
 Captures stop after the time limit (default 300 s, max 3600), at 100,000 packets, on Stop, or when the session expires.
 
 ## Security design
-- Container: Alpine, non-root UID 10001, read-only root FS, `cap_drop: ALL`, `no-new-privileges`, noexec tmpfs, CPU/memory/PID limits, published on 127.0.0.1 only. Only `openssh-client` is added; pip is removed.
+- Container: Alpine, non-root UID 10001, read-only root FS, `cap_drop: ALL`, `no-new-privileges`, noexec tmpfs, CPU/memory/PID limits. Port binding is controlled by `WIRELIGHT_BIND_IP` (default 127.0.0.1; this configured LAN package sets `0.0.0.0`). Only `openssh-client` is added; pip is removed.
 - Keys live only in the `wirelight-data` volume (`/data/keys`, dir 0700, files 0600). No API returns a private key; nothing is logged (HTTP logging is disabled, SSH `LogLevel=ERROR`, error text is truncated). Key generation happens in a throwaway tmpfs dir that is deleted immediately. Keys are unencrypted (needed for unattended capture) so protect the Docker volume/host. Delete a key from the UI (or `docker compose down -v` to wipe everything).
 - SSH: argv lists only (no local shell), `BatchMode`, key-only auth, `StrictHostKeyChecking=yes` with a private known_hosts, no agent/port forwarding. Remote arguments are allow-listed and shell-quoted; the remote command is fixed to `ls /sys/class/net` or `tcpdump -w -`.
-- Control API is protected against CSRF and DNS rebinding: Host allow-list (`ALLOWED_HOSTS`, default localhost), Origin check, and a required custom header. Add your hostname to `ALLOWED_HOSTS` if you reach it by another name, and put TLS + auth in front before exposing it beyond localhost.
+- The Host allowlist (`ALLOWED_HOSTS`) has been removed by request. An Origin check and `X-Requested-With: wirelight` requirement remain for API requests, but **neither replaces authentication nor guarantees protection against DNS rebinding**. LAN users can reach the AI and SSH-control endpoints: **restrict access with your firewall**, and add TLS + authentication before exposing it beyond a trusted local network.
 - Uploads/captures are held in memory only; size, packet, session (4) and live-capture (2) caps; 30-minute expiry; strict CSP; UI renders text with `textContent`; the query parser never builds code or regexes from input.
 - Python standard library only.
 
 ## Layout
 `app/pcap.py` parser · `app/nlq.py` query engine · `app/ssh.py` keys + remote capture · `app/server.py` API · `app/static/` UI.
 
-## Ask AI about your capture (LM Studio)
+## Ask AI about your capture (Mistral cloud or local LM Studio)
 
-Wirelight loads and analyzes your PCAP locally to populate the packet dashboard. **It does not contact LM Studio automatically**, either when uploading a capture or during live capture. Type a question into **Ask AI** to discuss that capture, including follow-up questions, or explicitly choose **Generate AI report** for a structured assessment. The optional report has categories for normal activity, suspicious/anomalous behavior, possible attacks and possible vulnerabilities, with evidence, confidence, limitations and next steps. Export the report as JSON or Markdown. If LM Studio is unavailable, the regular packet dashboard continues working.
+**PCAP loading and live packet capture never invoke an AI model on their own.** The dashboard is completely functional with AI disabled. After loading a capture, ask a question in the chat, ask follow-ups, or explicitly choose **Generate AI report**. Optional reports include normal activity, suspicious/anomalous behavior, potential attacks and possible vulnerabilities, evidence, limitations and next steps; export as JSON or Markdown. Conclusions are hypotheses, not confirmed incidents.
 
-1. Run LM Studio on a machine reachable by the **Docker container** (not necessarily by the browser). In LM Studio load an instruction-following model, start its OpenAI-compatible local server and note its exposed listening address and model identifier.
-2. Configure the connection via a `.env` file next to `docker-compose.yml`:
+### Mistral AI hosted (default)
+
+**Important: Hosted access is not guaranteed free.** Mistral's current [Usage and limits docs](https://docs.mistral.ai/admin/billing-usage/usage-limits) state that **Free mode does not include API access** and enabling API keys requires billing activation/pay-as-you-go. Older articles about an Experiment API free tier may be out of date. Check your own Mistral Studio account's API eligibility, pricing and billing settings before using the hosted provider. For a truly no-API-fee option, see **Local LM Studio** below.
+
+1. Check your Mistral Studio API access; generate a key under **API Keys** if your account permits it: https://console.mistral.ai/ . Do **not** put the key in webpage JavaScript or send it to anyone.
+2. Copy `.env.example` to `.env` next to `docker-compose.yml`, and set:
+
    ```dotenv
+   AI_ENABLED=true
+   AI_PROVIDER=mistral
+   MISTRAL_API_KEY=your-own-private-key
+   MISTRAL_MODEL=ministral-8b-latest
+   MISTRAL_TIMEOUT=120
+   ```
+
+   The selected `ministral-8b-latest` is a lightweight starting model, **not a promise of free access**. You can change `MISTRAL_MODEL` to one available to your account in Mistral Studio; e.g. `mistral-small-latest` (which may have higher charges). Hosted traffic goes to Mistral's fixed HTTPS endpoint `https://api.mistral.ai/v1/chat/completions` and the key stays in the backend. Model availability and rate limits depend on your plan.
+3. Start/recreate Wirelight: `docker compose up -d --build --force-recreate`. The AI panel identifies the active provider, model, and whether an API key is configured. If the key is missing, the chat and report controls are disabled with an explanation. If the backend reports HTTP **401/403**, check key and billing; HTTP **429** means quota or rate limit (or that your account has no allowance for that model); HTTP **400/404/422** may mean the model is unavailable to your account.
+
+### Local LM Studio (no cloud API charges)
+
+1. Install or keep LM Studio and download a small **Mistral-family instruct model** that your computer can run quickly (for example, a quantized Ministral model compatible with LM Studio). Start its OpenAI-compatible server.
+2. In `.env` switch provider and configure the actual model ID/host:
+
+   ```dotenv
+   AI_ENABLED=true
+   AI_PROVIDER=lmstudio
    LM_STUDIO_HOST=host.docker.internal
    LM_STUDIO_PORT=1234
-   LM_STUDIO_MODEL=your-loaded-model-identifier
    LM_STUDIO_SCHEME=http
+   LM_STUDIO_MODEL=your-loaded-model-identifier
    LM_STUDIO_TIMEOUT=240
-   AI_ENABLED=true
-   # LM_STUDIO_API_KEY=optional-bearer-token
    ```
-   Then run `docker compose up --build`. On Linux Docker Engine, `host.docker.internal` is mapped to the Docker host gateway. If LM Studio is on a **different host**, specify its DNS hostname or IP. On Windows/macOS Docker Desktop, `host.docker.internal` resolves to the host. LM Studio must listen on an address accessible from Docker; binding only to `127.0.0.1` on the host may not suffice. Secure the connection and restrict LM Studio network access with host firewall or private networking. Set `LM_STUDIO_SCHEME=https` when using an HTTPS-terminating proxy with a trusted CA. The port is a number between 1 and 65535.
-3. Open the dashboard; the AI panel displays the server-side configured endpoint, model and timeout. Upload a PCAP or start live capture. Ask a question such as **"Are there signs of scanning?"** or **"What traffic involves 10.0.0.5?"**. Follow up in the same chat, or click **Generate AI report** to create a formal assessment. The server's API key, if configured, is never returned to the browser.
 
-**Timeout troubleshooting:** The older version used a hardcoded 35-second timeout; a large LM Studio model could receive the request but not respond before the dashboard displayed a misleading "Cannot reach LM Studio" error. The default is now 240 seconds (set `LM_STUDIO_TIMEOUT` between 10 and 900). If you still get HTTP 504, check the LM Studio server output for model loading / tokens per second and raise the timeout or use a smaller model. Connection errors and malformed model responses now return more specific HTTP 502 errors. Changes to `.env` require recreating the container with `docker compose up -d --build --force-recreate`.
+3. Recreate the container: `docker compose up -d --force-recreate`. On Linux Docker Engine, `host.docker.internal` maps to the host gateway; when connecting to a separate machine, enter its IP or DNS name. The server must listen on an address accessible to the container. Configure firewall and access controls accordingly. This option has no Mistral-hosted API usage charges, but generation speed still depends on your hardware.
 
-**Privacy & trust boundary:** When you explicitly ask a question or generate a report, the LM Studio request contains aggregate counts, IP addresses, destination ports, timestamps, protocol labels, TCP flags totals and scan indicators. Questions also send your question text and up to six prior chat messages for conversational context. It **never sends full PCAP bytes, raw payloads, HTTP URLs or DNS query names**. Network IPs and timing can still be sensitive. Do not point the endpoint at a third-party service without authorization. The host/port is operator-configured through environment variables rather than arbitrary user-submitted URLs, limiting SSRF. Responses are size-bounded and added to the DOM using `textContent` (never interpreted as HTML); malformed responses produce a visible error. Questions and answers for follow-up context are kept only in the current in-memory session, with a bounded history. AI findings are **hypotheses**, not confirmed vulnerabilities or incident conclusions. The app does not do signature matching, CVE scans, TLS decryption or TCP stream reconstruction. The AI report is stored only in the existing ephemeral in-memory capture session and is exported locally in the browser. No AI dependencies are installed in Alpine.
+**Privacy:** Wirelight sends data to the selected provider **only after a user asks a question or generates a report**. It sends aggregated traffic metadata: IP addresses, port numbers, protocol totals, counts, timestamps, scan indicators, and (for chat) the question plus up to six recent conversation messages. It **does not** send full PCAP bytes, packet payloads, HTTP URIs, DNS names or raw packet rows. **Cloud Mistral is a third party:** the transmitted IP addresses, timing, and questions may still be confidential. Mistral's [data-use policy](https://help.mistral.ai/en/articles/347617-do-you-use-my-user-data-to-train-your-artificial-intelligence-models) says Free mode requests may be used for training; review privacy settings and only upload authorized metadata. Use the local option for sensitive captures.
 
-**API:** `GET /api/ai/config` returns safe display configuration; `POST /api/ai/ask` accepts JSON `{"id":"<session-id>","question":"..."}` and returns `{"answer":"...","packet_count":123}`; `GET /api/ai/chat?id=...` returns the in-session conversation; `POST /api/ai/analyze` returns a structured report only if invoked; `GET /api/ai/report?id=...` returns the last report. All use the existing `X-Requested-With: wirelight` protection. Only one AI request per capture can be in flight. The model request times out after `LM_STUDIO_TIMEOUT` seconds (default 240) and its response is limited to 64 KiB. The model endpoint is fixed at `/v1/chat/completions`.
+**Security and implementation:** API keys stay in `.env` and the backend container, never in API responses or frontend JavaScript; `.env` is excluded from the Docker build context and ignored by Git. Cloud requests have a fixed HTTPS endpoint (TLS certificate verified, redirects refused) and do not use ambient HTTP proxies. Request and response sizes are bounded. Model output is rendered with `textContent` (not HTML). Session chat and AI reports are kept in memory only and expire with the capture session. AI endpoints have `X-Requested-With: wirelight` protection; only one AI request per capture runs at a time. Response timeout defaults to 120 seconds in cloud mode, 240 locally, configurable up to 900 seconds. The app uses only Python standard-library HTTP clients, no Mistral SDK dependency.
 
-For a hackathon demo, a smaller local instruction-tuned model that reliably generates JSON is recommended. Models that wrap JSON in markdown fences are supported. If your LM Studio model has a different ID than the configured one, set `LM_STUDIO_MODEL` to that ID or any accepted alias. To disable AI, set `AI_ENABLED=false`.
+**API:** `GET /api/ai/config` returns safe display settings (never API keys); `POST /api/ai/ask` with `{"id":"<session-id>","question":"..."}` returns `{"answer":"...","packet_count":123}`; `GET /api/ai/chat?id=...` returns in-session chat; `POST /api/ai/analyze` generates the optional report; `GET /api/ai/report?id=...` retrieves it. `AI_ENABLED=false` disables all model requests. Tests are runnable offline with `python -m unittest discover -s tests -v`.

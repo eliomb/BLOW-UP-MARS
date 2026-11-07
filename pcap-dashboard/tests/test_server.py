@@ -10,8 +10,6 @@ class Endpoints(unittest.TestCase):
         self.srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), server.H)
         self.t = threading.Thread(target=self.srv.serve_forever, daemon=True); self.t.start()
         self.base = f'http://127.0.0.1:{self.srv.server_port}'
-        # Request Host contains dynamic port; caller must configure permitted Host for this test.
-        server.ALLOWED.add('127.0.0.1')
     def tearDown(self):
         self.srv.shutdown(); self.srv.server_close()
     def request(self, path, obj=None):
@@ -19,6 +17,37 @@ class Endpoints(unittest.TestCase):
         req = urllib.request.Request(self.base+path, data=data, headers={
             'X-Requested-With':'wirelight', **({'Content-Type':'application/json'} if data else {})})
         with urllib.request.urlopen(req) as r: return json.load(r)
+    def test_arbitrary_host_is_allowed(self):
+        """LAN Host headers no longer require app-level allowlisting."""
+        req = urllib.request.Request(self.base + '/healthz', headers={'Host': '10.0.12.15:8080'})
+        with urllib.request.urlopen(req) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertTrue(json.load(resp)['ok'])
+        req = urllib.request.Request(self.base + '/api/ai/config', headers={
+            'Host': '10.0.12.15:8080',
+            'Origin': 'http://10.0.12.15:8080',
+            'X-Requested-With': 'wirelight',
+        })
+        with urllib.request.urlopen(req) as resp:
+            self.assertEqual(resp.status, 200)
+
+    def test_cross_origin_and_missing_custom_header_still_denied(self):
+        req = urllib.request.Request(self.base + '/api/ai/config', headers={
+            'Host': '10.0.12.15:8080',
+            'Origin': 'http://other-site.example',
+            'X-Requested-With': 'wirelight',
+        })
+        with self.assertRaises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(req)
+        self.assertEqual(err.exception.code, 403)
+        req = urllib.request.Request(self.base + '/api/ai/config', headers={
+            'Host': '10.0.12.15:8080',
+            'Origin': 'http://10.0.12.15:8080',
+        })
+        with self.assertRaises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(req)
+        self.assertEqual(err.exception.code, 403)
+
     def test_original_routes_and_ai(self):
         pk=[dict(n=0, ts=10., len=64, src='192.0.2.1', dst='192.0.2.2', sport=1234,
                  dport=80, proto='HTTP', tr='TCP', flags='PA', info='GET /', txt='get /')]

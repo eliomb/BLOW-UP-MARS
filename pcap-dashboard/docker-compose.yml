@@ -1,7 +1,7 @@
 services:
   wirelight:
     build: .
-    ports: ["127.0.0.1:8080:8080"]
+    ports: ["${WIRELIGHT_BIND_IP:-127.0.0.1}:8080:8080"]
     user: "10001:10001"
     read_only: true
     cap_drop: [ALL]
@@ -9,10 +9,14 @@ services:
     tmpfs: ["/tmp:size=16m,noexec,nosuid,nodev"]
     volumes: ["wirelight-data:/data"]   # SSH keys + trusted host keys (only writable location)
     extra_hosts:
-      - "host.docker.internal:host-gateway" # Linux Docker Engine: LM Studio running on Docker host
+      - "host.docker.internal:host-gateway" # Optional LM Studio on Docker host (local mode)
     environment:
       MAX_UPLOAD_MB: "64"
       AI_ENABLED: "${AI_ENABLED:-true}"
+      AI_PROVIDER: "${AI_PROVIDER:-mistral}"
+      MISTRAL_API_KEY: "${MISTRAL_API_KEY:-}"
+      MISTRAL_MODEL: "${MISTRAL_MODEL:-ministral-8b-latest}"
+      MISTRAL_TIMEOUT: "${MISTRAL_TIMEOUT:-120}"
       LM_STUDIO_HOST: "${LM_STUDIO_HOST:-host.docker.internal}"
       LM_STUDIO_PORT: "${LM_STUDIO_PORT:-1234}"
       LM_STUDIO_SCHEME: "${LM_STUDIO_SCHEME:-http}"

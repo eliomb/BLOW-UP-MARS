@@ -1,4 +1,4 @@
-"""Bounded, metadata-only network assessment through an OpenAI-compatible LM Studio API."""
+"""Bounded, metadata-only network assessment through Mistral cloud or local LM Studio."""
 import collections
 import datetime
 import ipaddress
@@ -17,35 +17,53 @@ MAX_QUESTION = 1200
 
 
 class ModelTimeout(Exception):
-    """LM Studio accepted a request but did not finish within the configured wait."""
+    """Model backend did not finish within the configured wait."""
 
 
 class ModelUnavailable(Exception):
-    """LM Studio could not be contacted or returned an HTTP failure."""
+    """Model backend could not be contacted or returned an HTTP failure."""
 
 
 class ModelBadResponse(Exception):
-    """LM Studio responded, but did not supply a usable answer."""
+    """Model backend responded, but did not supply a usable answer."""
+
+
+class ModelRateLimited(Exception):
+    """Cloud model quota or request rate exceeded."""
 
 
 def config():
-    # Operator-controlled destination, not request-controlled: prevents arbitrary server-side requests.
-    host = os.environ.get('LM_STUDIO_HOST', 'host.docker.internal').strip()
-    port = int(os.environ.get('LM_STUDIO_PORT', '1234'))
-    model = os.environ.get('LM_STUDIO_MODEL', 'local-model').strip()
-    scheme = os.environ.get('LM_STUDIO_SCHEME', 'http').strip()
-    timeout = int(os.environ.get('LM_STUDIO_TIMEOUT', '240'))
-    if scheme not in ('http', 'https') or not 1 <= port <= 65535:
-        raise ValueError('Invalid LM Studio configuration')
+    # Provider and destination are operator-controlled, never supplied by the browser.
+    provider = os.environ.get('AI_PROVIDER', 'mistral').strip().lower()
+    enabled = os.environ.get('AI_ENABLED', 'true').lower() == 'true'
+    if provider == 'mistral':
+        model = os.environ.get('MISTRAL_MODEL', 'ministral-8b-latest').strip()
+        timeout = int(os.environ.get('MISTRAL_TIMEOUT', '120'))
+        key = os.environ.get('MISTRAL_API_KEY', '').strip()
+        endpoint = 'https://api.mistral.ai/v1/chat/completions'
+        configured = bool(key)
+    elif provider == 'lmstudio':
+        host = os.environ.get('LM_STUDIO_HOST', 'host.docker.internal').strip()
+        port = int(os.environ.get('LM_STUDIO_PORT', '1234'))
+        scheme = os.environ.get('LM_STUDIO_SCHEME', 'http').strip()
+        model = os.environ.get('LM_STUDIO_MODEL', 'local-model').strip()
+        timeout = int(os.environ.get('LM_STUDIO_TIMEOUT', '240'))
+        if scheme not in ('http', 'https') or not 1 <= port <= 65535:
+            raise ValueError('Invalid LM Studio configuration')
+        # Disallow credentials, paths, queries, fragments, controls and URL metacharacters.
+        if not re.fullmatch(r'[A-Za-z0-9.\-]{1,253}|\[[A-Fa-f0-9:]+\]', host) or '..' in host:
+            raise ValueError('Invalid LM Studio host')
+        endpoint = f'{scheme}://{host}:{port}/v1/chat/completions'
+        key = os.environ.get('LM_STUDIO_API_KEY', '').strip()
+        configured = True
+    else:
+        raise ValueError('AI_PROVIDER must be mistral or lmstudio')
     if not 10 <= timeout <= 900:
-        raise ValueError('LM_STUDIO_TIMEOUT must be 10–900 seconds')
-    # Disallow credentials, paths, queries, fragments, control characters and URL metacharacters.
-    if not re.fullmatch(r'[A-Za-z0-9.\-]{1,253}|\[[A-Fa-f0-9:]+\]', host) or '..' in host:
-        raise ValueError('Invalid LM Studio host')
+        raise ValueError('AI timeout must be 10–900 seconds')
     if not model or len(model) > 120 or any(ord(c) < 32 for c in model):
-        raise ValueError('Invalid LM Studio model')
-    return {'host': host, 'port': port, 'scheme': scheme, 'model': model,
-            'timeout': timeout, 'enabled': os.environ.get('AI_ENABLED', 'true').lower() == 'true'}
+        raise ValueError('Invalid AI model identifier')
+    return {'provider': provider, 'endpoint': endpoint, 'model': model,
+            'timeout': timeout, 'enabled': enabled, 'configured': configured, 'key': key}
 
 
 def observe(packets):
@@ -178,51 +196,66 @@ def normalize(obj, evidence):
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ValueError('LM Studio endpoint redirected; redirects are disabled for data privacy')
+        raise ModelUnavailable('AI endpoint redirected; redirects are blocked to protect capture metadata')
 
 
 def send_messages(messages, max_tokens=1800, temperature=0.1):
-    """Send a single, explicitly user-triggered request. Never stream packet bytes to LM Studio."""
+    """Send a single user-triggered request, with metadata rather than packet contents.
+
+    The hosted Mistral endpoint is HTTPS and fixed, to prevent a web request from
+    redirecting capture metadata to a caller-controlled server.
+    """
     cfg = config()
-    if not cfg['enabled']: raise ValueError('AI assistance is disabled by the operator')
-    host = cfg['host']
-    endpoint = f"{cfg['scheme']}://{host}:{cfg['port']}/v1/chat/completions"
-    data = json.dumps({'model': cfg['model'], 'temperature': temperature, 'stream': False,
-                       'max_tokens': max_tokens, 'messages': messages}, ensure_ascii=True).encode('utf-8')
+    if not cfg['enabled']:
+        raise ValueError('AI assistance is disabled by the operator')
+    provider_name = 'Mistral AI' if cfg['provider'] == 'mistral' else 'LM Studio'
+    if not cfg['configured']:
+        raise ValueError('Set MISTRAL_API_KEY in .env and recreate the container to enable Mistral AI')
+    body = {'model': cfg['model'], 'temperature': temperature, 'stream': False,
+            'max_tokens': max_tokens, 'messages': messages}
+    data = json.dumps(body, ensure_ascii=True).encode('utf-8')
     headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
-    key = os.environ.get('LM_STUDIO_API_KEY', '').strip()
-    if key: headers['Authorization'] = 'Bearer ' + key
-    req = urllib.request.Request(endpoint, data=data, headers=headers, method='POST')
+    if cfg['key']:
+        headers['Authorization'] = 'Bearer ' + cfg['key']
+    req = urllib.request.Request(cfg['endpoint'], data=data, headers=headers, method='POST')
     try:
-        # No environment proxy: endpoint is admin-controlled; prevent unintended exfiltration via HTTP_PROXY.
+        # No environment proxy: prevent unintended exfiltration through HTTP(S)_PROXY.
+        # Python verifies the remote HTTPS certificate by default.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         with opener.open(req, timeout=cfg['timeout']) as r:
             payload = r.read(MAX_OUTPUT + 1)
-        if len(payload) > MAX_OUTPUT: raise ModelBadResponse('LM Studio response exceeded the size limit')
+        if len(payload) > MAX_OUTPUT:
+            raise ModelBadResponse(f'{provider_name} response exceeded the size limit')
         response = json.loads(payload)
         content = response['choices'][0]['message']['content']
         if isinstance(content, list):
-            content = '\n'.join(part.get('text', '') for part in content if isinstance(part, dict) and part.get('type') == 'text')
+            content = '\n'.join(part.get('text', '') for part in content
+                                if isinstance(part, dict) and part.get('type') == 'text')
         if not isinstance(content, str) or not content.strip():
-            raise ModelBadResponse('LM Studio returned no answer text (try increasing max_tokens or choosing another model)')
-        # Some models emit reasoning blocks as part of their content; show only the final answer.
+            raise ModelBadResponse(f'{provider_name} returned no answer text')
         content = re.sub(r'<think>.*?</think>', '', content, flags=re.S).strip()
         if not content:
-            raise ModelBadResponse('LM Studio returned only reasoning text, with no final answer')
+            raise ModelBadResponse(f'{provider_name} returned only reasoning text, not an answer')
         return content
     except urllib.error.HTTPError as e:
-        raise ModelUnavailable(f'LM Studio returned HTTP {e.code}. Check the model name and LM Studio server logs.') from None
+        if cfg['provider'] == 'mistral':
+            if e.code in (401, 403):
+                raise ModelUnavailable('Mistral AI denied API access (HTTP %d). Check your API key, billing activation and model permissions.' % e.code) from None
+            if e.code == 429:
+                raise ModelRateLimited('Mistral API quota or rate limit reached (HTTP 429). Check your workspace limits and model availability in Mistral Studio.') from None
+            if e.code in (400, 404, 422):
+                raise ModelUnavailable('Mistral API rejected the request (HTTP %d). Check MISTRAL_MODEL and your account model access.' % e.code) from None
+        raise ModelUnavailable('%s returned HTTP %d. Check the configured model and API server.' % (provider_name, e.code)) from None
     except (socket.timeout, TimeoutError):
-        raise ModelTimeout(f'LM Studio did not finish responding within {cfg["timeout"]} seconds. '
-                           'The model may still be loading or generating; raise LM_STUDIO_TIMEOUT if needed.') from None
+        raise ModelTimeout(f'{provider_name} did not finish within {cfg["timeout"]} seconds. Increase the provider timeout if needed.') from None
     except urllib.error.URLError as e:
         if isinstance(e.reason, (socket.timeout, TimeoutError)):
-            raise ModelTimeout(f'LM Studio did not finish responding within {cfg["timeout"]} seconds.') from None
-        raise ModelUnavailable(f'Cannot connect to LM Studio at {cfg["host"]}:{cfg["port"]}: {e.reason}') from None
-    except OSError as e:
-        raise ModelUnavailable(f'Connection to LM Studio failed: {e}') from None
+            raise ModelTimeout(f'{provider_name} did not finish within {cfg["timeout"]} seconds.') from None
+        raise ModelUnavailable(f'Cannot reach {provider_name}. Check the server network connection and endpoint.') from None
+    except OSError:
+        raise ModelUnavailable(f'Connection to {provider_name} failed. Check server networking and TLS certificates.') from None
     except (KeyError, IndexError, json.JSONDecodeError, TypeError):
-        raise ModelBadResponse('LM Studio returned an invalid OpenAI-compatible response.') from None
+        raise ModelBadResponse(f'{provider_name} returned an invalid chat completion response.') from None
 
 
 def analyze(evidence):

@@ -3,3 +3,7 @@ __pycache__
 .git
 *.zip
 *.pcap*
+
+.env
+.env.*
+!*.example
