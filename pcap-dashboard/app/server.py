@@ -1,7 +1,7 @@
-import collections, json, os, secrets, threading, time, subprocess, struct, datetime
+import collections, json, os, secrets, threading, time, subprocess, struct, datetime, sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
-import nlq, pcap, ssh, ai, evidence, networkmap
+import nlq, pcap, ssh, ai, evidence, networkmap, capturestore
 
 MAX_UP = max(1, min(512, int(os.environ.get('MAX_UPLOAD_MB', '256')))) * 2 ** 20
 TTL, MAX_SESS = 1800, 4
@@ -28,12 +28,16 @@ def session(sid):
         s = SESS.get(sid)
         if s and s['exp'] > time.time(): s['exp'] = time.time() + TTL; return s
 
-def new_session(pk, raw):
+def discard(s):
+    ssh.stop(s)
+    if s.get('store'): s['store'].close()
+
+def new_session(pk, raw, store=None):
     sid = secrets.token_urlsafe(24)
     with LOCK:
-        for k in [k for k, v in SESS.items() if v['exp'] < time.time()]: ssh.stop(SESS.pop(k))
+        for k in [k for k, v in SESS.items() if v['exp'] < time.time()]: discard(SESS.pop(k))
         while len(SESS) >= MAX_SESS: ssh.stop(SESS.pop(min(SESS, key=lambda k: SESS[k]['exp'])))
-        SESS[sid] = s = dict(pk=pk, raw=raw, exp=time.time() + TTL)
+        SESS[sid] = s = dict(pk=pk, raw=raw, store=store, exp=time.time() + TTL)
     return sid, s
 
 class H(BaseHTTPRequestHandler):
@@ -63,6 +67,7 @@ class H(BaseHTTPRequestHandler):
         except subprocess.TimeoutExpired: self.out(504, {'error': 'Timed out talking to the remote host'})
         except ai.ModelTimeout as e: self.out(504, {'error': str(e)})
         except ai.ModelRateLimited as e: self.out(429, {'error': str(e)})
+        except sqlite3.Error as e: self.out(507, {'error': 'Packet index storage error. Check free disk space in the Wirelight data volume and MAX_CAPTURE_STORE_MB.'})
         except (ai.ModelUnavailable, ai.ModelBadResponse) as e: self.out(502, {'error': str(e)})
         except (ValueError, IndexError, KeyError) as e: self.out(400, {'error': str(e) or 'Bad request'})
         except Exception: self.out(500, {'error': 'Internal error'})
@@ -87,7 +92,11 @@ class H(BaseHTTPRequestHandler):
                                   'context_settings': evidence.options()})
         s = session(q.get('id', ''))
         if not s: return self.out(404, {'error': 'Session expired. Start again.'})
-        pk = s['pk'][:]
+        store = s.get('store')
+        pk = s['pk'][:] if not store else []
+        if u.path == '/api/packets' and store:
+            off, n = max(0, int(q.get('offset', 0))), min(500, max(1, int(q.get('limit', 100))))
+            return self.out(200, store.page(q.get('q', ''), off, n, q.get('proto', ''), q.get('port', ''), q.get('host', '')))
         if u.path == '/api/packets':
             match, chips, lim = nlq.parse(q.get('q', ''))
             rows = [p for p in pk if match(p)]
@@ -97,13 +106,40 @@ class H(BaseHTTPRequestHandler):
             return self.out(200, dict(total=len(rows), filters=chips, rows=[dict({k: p[k] for k in keys}, t=round(p['ts'] - t0, 6)) for p in rows[off:off + n]]))
         if u.path == '/api/packet':
             i = int(q.get('n', -1))
-            if not 0 <= i < len(pk): raise IndexError('No such packet')
-            p = pk[i]
-            frame = s['raw'][i][:8192]
+            if store:
+                p, stored = store.get(i)
+            else:
+                if not 0 <= i < len(pk): raise IndexError('No such packet')
+                p, stored = pk[i], s['raw'][i]
+            frame = stored[:8192]
             return self.out(200, dict(p={k: p[k] for k in ('n', 'ts', 'len', 'src', 'dst', 'sport', 'dport', 'tr', 'proto', 'flags', 'info')},
                                       decoded=pcap.packet_layers(frame, p.get('link', 1)),
-                                      captured_bytes=len(s['raw'][i]), inspected_bytes=len(frame),
+                                      captured_bytes=len(stored), inspected_bytes=len(frame),
                                       hex=pcap.hexdump(frame)))
+        if u.path == '/api/live/download' and store:
+            if not s.get('live'):
+                return self.out(400, {'error': 'Download is available for remote captures only'})
+            if not store.count:
+                return self.out(400, {'error': 'No remote packets captured yet'})
+            with store.lock:
+                store.flush()
+                count = store.count  # Snapshot a fixed packet range while live capture can continue.
+                types = store.conn.execute('SELECT DISTINCT link FROM packets WHERE n < ? LIMIT 2', (count,)).fetchall()
+                if len(types) != 1:
+                    return self.out(409, {'error': 'Multiple link types cannot be exported to classic PCAP'})
+                size = 24 + 16 * count + store.conn.execute('SELECT SUM(LENGTH(frame)) FROM packets WHERE n < ?', (count,)).fetchone()[0]
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/vnd.tcpdump.pcap')
+            self.send_header('Content-Length', str(size))
+            self.send_header('Content-Disposition', 'attachment; filename="wirelight-remote-capture.pcap"')
+            for key, val in SEC.items(): self.send_header(key, val)
+            self.end_headers()
+            try:
+                self.wfile.write(pcap.pcap_header(types[0][0]))
+                for ts, orig, link, frame in store.iter_export(count):
+                    self.wfile.write(pcap.pcap_record(ts, frame, orig))
+            except (BrokenPipeError, ConnectionResetError): pass
+            return
         if u.path == '/api/live/download':
             if not s.get('live'):
                 return self.out(400, {'error': 'Download is available for remote captures only'})
@@ -128,12 +164,12 @@ class H(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError): pass
             return
         if u.path == '/api/ai/report':
-            return self.out(200, {'report': s.get('ai_report'), 'packet_count': len(pk)})
+            return self.out(200, {'report': s.get('ai_report'), 'packet_count': store.count if store else len(pk)})
         if u.path == '/api/ai/chat':
-            return self.out(200, {'messages': s.get('ai_chat', []), 'packet_count': len(pk)})
+            return self.out(200, {'messages': s.get('ai_chat', []), 'packet_count': store.count if store else len(pk)})
         if u.path == '/api/live/status':
             L = s.get('live') or {}
-            return self.out(200, dict(running=bool(L.get('running')), error=L.get('error', ''), stats=stats(pk)))
+            return self.out(200, dict(running=bool(L.get('running')), error=L.get('error', ''), stats=store.stats() if store else stats(pk)))
         self.out(404, {'error': 'Not found'})
 
     def post(self):
@@ -144,7 +180,7 @@ class H(BaseHTTPRequestHandler):
             if not 0 < n <= MAX_UP:
                 return self.out(413, {'error': f'File must be under {MAX_UP >> 20} MB. Change MAX_UPLOAD_MB if needed.'})
             reader = pcap.CaptureReader()
-            pk, raw = [], []
+            store = capturestore.Store()
             remaining = n
             try:
                 while remaining:
@@ -152,15 +188,15 @@ class H(BaseHTTPRequestHandler):
                     if not chunk: raise ValueError('Upload interrupted before file was received')
                     remaining -= len(chunk)
                     for rec in reader.feed(chunk):
-                        pk.append(pcap.dissect(len(pk), rec))
-                        pk[-1]['link'] = rec[2]
-                        raw.append(rec[3][:pcap.SNAP])
-                if not pk: raise ValueError('No packets found in file')
-            except ValueError as e:
-                return self.out(400, {'error': str(e)})
-            sid, _ = new_session(pk, raw)
-            return self.out(200, dict(id=sid, stats=stats(pk),
-                                      truncated=len(pk) >= pcap.MAXPKT))
+                        store.append(rec)
+                reader.finish()
+                if not store.count: raise ValueError('No packets found in file')
+                store.finalize()
+            except Exception:
+                store.close()
+                raise
+            sid, _ = new_session([], [], store)
+            return self.out(200, dict(id=sid, stats=store.stats(), truncated=False))
         b = self.jbody()
         if p == '/api/maps/create':
             return self.out(200, {'map': networkmap.create(b.get('name', ''), b.get('subnet', ''), b.get('notes', ''))})
@@ -190,15 +226,32 @@ class H(BaseHTTPRequestHandler):
             with LOCK:
                 if s.get('ai_busy'): return self.out(409, {'error': 'Another AI request is still running for this capture'})
                 s['ai_busy'] = True
-                packets = s['pk'][:]
-                raws = s['raw'][:]
+                packets, raws = s['store'].ai_sample(question=question if p == '/api/ai/ask' else '') if s.get('store') else (s['pk'][:], s['raw'][:])
                 history = s.get('ai_chat', [])[:]
             try:
                 selected_maps = [networkmap.context(map_id, packets) for map_id in map_ids]
                 context = evidence.build(packets, raws,
                                          question if p == '/api/ai/ask' else '',
-                                         numbers if p == '/api/ai/ask' else [],
+                                         numbers if p == '/api/ai/ask' and not s.get('store') else [],
                                          selected_maps)
+                if s.get('store'):
+                    capture_stats = s['store'].stats()
+                    scope = context['context_scope']
+                    scope['total_parsed_packets'] = s['store'].count
+                    scope['evidence_subset_packet_count'] = len(packets)
+                    scope['capture_packet_limit_reached'] = False
+                    scope['sample_policy'] = 'Capture-wide strided metadata sample with recent protocol/flag examples and question-matched hosts; NOT full-packet analysis'
+                    context['full_capture_statistics'] = capture_stats
+                    context['analysis_limitations'] = [x for x in context['analysis_limitations'] if 'first 100,000' not in x] + [
+                        f'Full capture contains {s["store"].count:,} indexed packets. Detailed behavioral inference is based on {len(packets):,} sampled packets, not all packets; summary totals use the entire capture.'
+                    ]
+                    if numbers:
+                        chosen = []
+                        for number in dict.fromkeys(numbers):
+                            packet, frame = s['store'].get(number)
+                            chosen.append(ai.packet_context(packet, frame))
+                        context['explicitly_selected_packet_details'] = chosen
+
                 if p == '/api/ai/analyze':
                     report = ai.analyze(context)
                     with LOCK: s['ai_report'] = report
@@ -207,7 +260,7 @@ class H(BaseHTTPRequestHandler):
                 with LOCK:
                     s['ai_chat'] = (history + [{'role': 'user', 'content': question.strip()},
                                                {'role': 'assistant', 'content': answer}])[-12:]
-                return self.out(200, {'answer': answer, 'packet_count': len(packets),
+                return self.out(200, {'answer': answer, 'packet_count': s['store'].count if s.get('store') else len(packets),
                                       'context_scope': context['context_scope']})
             finally:
                 with LOCK: s['ai_busy'] = False
@@ -221,10 +274,12 @@ class H(BaseHTTPRequestHandler):
             c = ssh.conn(b)
             with LOCK:
                 if sum(1 for v in SESS.values() if v.get('live', {}).get('running')) >= 2: raise ValueError('Too many live captures running')
-            sid, s = new_session([], [])
+            store = capturestore.Store()
+            sid, s = new_session([], [], store)
             try: ssh.live(s, c, str(b.get('iface', '')), str(b.get('filter', '')), int(b.get('seconds', 300)))
             except Exception:
                 with LOCK: SESS.pop(sid, None)
+                discard(s)
                 raise
             return self.out(200, {'id': sid})
         if p == '/api/live/stop':
@@ -235,4 +290,5 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     ssh.init()
+    capturestore.cleanup_stale()
     ThreadingHTTPServer(('0.0.0.0', 8080), H).serve_forever()

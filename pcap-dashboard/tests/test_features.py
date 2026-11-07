@@ -37,7 +37,8 @@ class Features(unittest.TestCase):
         self.srv.shutdown()
         self.srv.server_close()
         with server.LOCK:
-            server.SESS.clear()
+            active = list(server.SESS.values()); server.SESS.clear()
+        for item in active: server.discard(item)
 
     def req(self, route, body=None, raw=False):
         headers = {'X-Requested-With': 'wirelight'}

@@ -1,6 +1,6 @@
 """Dependency-free pcap/pcapng reader and packet dissector."""
 import struct, socket
-MAXPKT, SNAP = 100000, 1600
+MAXPKT, SNAP = 100000, 1600  # MAXPKT legacy compatibility only; readers no longer enforce it
 FL = [(1, 'F'), (2, 'S'), (4, 'R'), (8, 'P'), (16, 'A'), (32, 'U')]
 
 def read(d):
@@ -11,7 +11,7 @@ def read(d):
           b'\xa1\xb2\xc3\xd4': ('>', 1e6), b'\xa1\xb2\x3c\x4d': ('>', 1e9)}
     if m not in fm: raise ValueError("Unsupported file: expected pcap or pcapng")
     e, res = fm[m]; link = struct.unpack(e + 'I', d[20:24])[0]; o = 24; r = []
-    while o + 16 <= len(d) and len(r) < MAXPKT:
+    while o + 16 <= len(d):
         s, f, cl, ol = struct.unpack(e + 'IIII', d[o:o + 16]); o += 16
         if cl > 262144: break
         r.append((s + f / res, ol, link, d[o:o + cl])); o += cl
@@ -19,7 +19,7 @@ def read(d):
 
 def _ng(d):
     r, o, e, ifs = [], 0, '<', []
-    while o + 12 <= len(d) and len(r) < MAXPKT:
+    while o + 12 <= len(d):
         if d[o:o + 4] == b'\x0a\x0d\x0d\x0a':
             e = '<' if d[o + 8:o + 12] == b'\x4d\x3c\x2b\x1a' else '>'; ifs = []
         t, n = struct.unpack(e + 'II', d[o:o + 8])
@@ -115,8 +115,8 @@ class Stream:
 class CaptureReader:
     """Incrementally read classic pcap or pcapng without buffering the whole upload.
 
-    feed() returns bounded individual records. Callers can discard records after MAXPKT,
-    but should keep draining the HTTP body so keep-alive connections stay usable.
+    feed() returns bounded individual records as chunks arrive. No packet-count cutoff;
+    callers should persist or aggregate them rather than building unlimited lists.
     """
     def __init__(self):
         self.buf = bytearray()
@@ -126,13 +126,16 @@ class CaptureReader:
         self.interfaces = []
         self.total = 0
 
+    def finish(self):
+        """Reject incomplete final records rather than silently dropping the tail."""
+        if self.kind is None or (self.kind == 'pcap' and self.stream.buf) or (self.kind == 'pcapng' and self.buf):
+            raise ValueError('Capture ended with an incomplete packet or block')
+
     def feed(self, data):
-        if self.total >= MAXPKT:
-            return []
         if self.kind == 'pcap':
             result = self.stream.feed(data)
             self.total += len(result)
-            return result[:max(0, MAXPKT - (self.total - len(result)))]
+            return result
         self.buf.extend(data)
         if self.kind is None:
             if len(self.buf) < 4:
@@ -180,12 +183,10 @@ class CaptureReader:
                     link, res = self.interfaces[iface]
                     result.append(((high << 32 | low) / res, original, link, block[20:20+captured]))
                     self.total += 1
-                    if self.total >= MAXPKT: break
             elif typ == 3 and len(block) >= 4 and self.interfaces:
                 original = struct.unpack_from(e + 'I', block)[0]
                 result.append((0.0, original, self.interfaces[0][0], block[4:4+min(original, len(block)-4)]))
                 self.total += 1
-                if self.total >= MAXPKT: break
         return result
 
 

@@ -1,6 +1,6 @@
 # Wirelight – PCAP analysis dashboard
 
-Upload a `.pcap` / `.pcapng` file, see summary stats, and filter packets with plain English.
+Upload a `.pcap` / `.pcapng` file, see complete-capture summary stats, and filter packets with a simple search field, protocol/port selectors or optional plain-English queries.
 
 ## Run
 ```bash
@@ -10,7 +10,7 @@ docker compose up --build
 Stop with `docker compose down`. Or without Compose:
 ```bash
 docker build -t wirelight .
-docker run --rm -p 8080:8080 wirelight
+docker run --rm -p 8080:8080 -v wirelight-data:/data wirelight
 ```
 The image is built locally from `python:3.12-alpine` (the only thing pulled from the internet); nothing is pulled from a registry under the name `wirelight`.
 
@@ -28,7 +28,7 @@ The image is built locally from `python:3.12-alpine` (the only thing pulled from
 | `"password"` or `containing admin` | search payload text, info, addresses |
 | `first 20 …`, `last 50 …` | limit results |
 
-Terms are combined with AND. The chips under the search box show exactly how your query was interpreted. Click a protocol, host, or packet to drill down.
+The search field accepts ordinary IP addresses, ports (`443`), `src:IP`, `dst:IP`, quoted text, and the legacy plain-English queries above. Use the separate protocol and port filters, type to filter automatically (450 ms debounce), or Clear to reset. Terms are combined with AND; the chips show how a plain-English query was interpreted. Only 100 results render at once, so the page stays responsive even with large captures. Click a protocol, host, or packet to drill down.
 
 ## Remote live capture (over SSH)
 1. **Remote capture** tab → **Generate key** (ed25519). Copy the shown `echo '…' >> ~/.ssh/authorized_keys` command and run it on the server as the SSH user.
@@ -37,14 +37,14 @@ Terms are combined with AND. The chips under the search box show exactly how you
 
 Remote requirements: Linux with `tcpdump`, and either an SSH user that is root, **or** passwordless sudo for tcpdump (tick the box), e.g. in `/etc/sudoers.d/wirelight`:
 `youruser ALL=(root) NOPASSWD: /usr/bin/tcpdump`, **or** `setcap cap_net_raw,cap_net_admin=eip $(which tcpdump)`.
-Captures stop after the time limit (default 300 s, max 3600), at 100,000 packets, on Stop, or when the session expires.
+Captures stop after the time limit (default 300 s, max 3600), after reaching the configured raw download byte budget (`MAX_REMOTE_CAPTURE_MB`, default 128 MB), on Stop, or when the session expires. There is no longer a 100,000-packet cutoff.
 
 ## Security design
 - Container: Alpine, non-root UID 10001, read-only root FS, `cap_drop: ALL`, `no-new-privileges`, noexec tmpfs, CPU/memory/PID limits. Port binding is controlled by `WIRELIGHT_BIND_IP` (default 127.0.0.1; this configured LAN package sets `0.0.0.0`). Only `openssh-client` is added; pip is removed.
 - Keys live only in the `wirelight-data` volume (`/data/keys`, dir 0700, files 0600). No API returns a private key; nothing is logged (HTTP logging is disabled, SSH `LogLevel=ERROR`, error text is truncated). Key generation happens in a throwaway tmpfs dir that is deleted immediately. Keys are unencrypted (needed for unattended capture) so protect the Docker volume/host. Delete a key from the UI (or `docker compose down -v` to wipe everything).
 - SSH: argv lists only (no local shell), `BatchMode`, key-only auth, `StrictHostKeyChecking=yes` with a private known_hosts, no agent/port forwarding. Remote arguments are allow-listed and shell-quoted; the remote command is fixed to `ls /sys/class/net` or `tcpdump -w -`.
 - The Host allowlist (`ALLOWED_HOSTS`) has been removed by request. An Origin check and `X-Requested-With: wirelight` requirement remain for API requests, but **neither replaces authentication nor guarantees protection against DNS rebinding**. LAN users can reach the AI and SSH-control endpoints: **restrict access with your firewall**, and add TLS + authentication before exposing it beyond a trusted local network.
-- Uploads/captures are held in memory only; size, packet, session (4) and live-capture (2) caps; 30-minute expiry; strict CSP; UI renders text with `textContent`; the query parser never builds code or regexes from input.
+- Uploads/captures are indexed in temporary SQLite files under `/data/captures`, not held entirely in memory. Session limit (4), concurrent live-capture limit (2), upload/download byte limits and per-capture disk budgets apply. Sessions expire after 30 minutes of inactivity; indexes are cleaned up when sessions are evicted and on service restart. Saved network maps and SSH keys are stored separately and never deleted by this cleanup. Captured packet data is sensitive and remains in plaintext on disk while sessions are active. Use volume encryption and protect the Docker host. Strict CSP and text rendering protect the UI; all database queries are parameterized.
 - Python standard library only.
 
 ## Layout
@@ -101,7 +101,7 @@ AI_PACKET_SAMPLES=72
 AI_PAYLOAD_CHARS=400
 ```
 
-`AI_CONTEXT_CHARS` limits the JSON evidence sent in each request (12,000–150,000 characters). `AI_PACKET_SAMPLES` limits packet examples (8–160), chosen from packet-pattern observations, question-specific hosts, TCP flag patterns, protocols and across the capture timeline. `AI_PAYLOAD_CHARS` limits each sampled packet's readable payload excerpt (0–1,600). **All retained packet metadata is still used for the behavioral summaries.** Larger settings can improve coverage, but can also increase latency, token charges and model confusion; more text isn't automatically more accurate. For a lightweight hosted 8B model, first test the defaults against known attack PCAPs before raising limits. The parser currently retains at most the first **100,000 packets**, with at most the first **1,600 bytes per uploaded frame**, so missing traffic cannot be recovered by a larger AI context setting. No stream reassembly, automated TLS decryption, or host-level intrusion verification is provided.
+`AI_CONTEXT_CHARS` limits the JSON evidence sent in each request (12,000–150,000 characters). `AI_PACKET_SAMPLES` limits packet examples (8–160), chosen from packet-pattern observations, question-specific hosts, TCP flag patterns, protocols and across the capture timeline. `AI_PAYLOAD_CHARS` limits each sampled packet's readable payload excerpt (0–1,600). **On large captures, AI behavioral summaries use a bounded capture-wide metadata sample; complete-capture totals are supplied separately.** Larger settings can improve coverage, but can also increase latency, token charges and model confusion; more text isn't automatically more accurate. For a lightweight hosted 8B model, first test the defaults against known attack PCAPs before raising limits. Every uploaded packet is indexed, but detailed AI evidence is sampled, and individual uploaded frames keep at most the first **1,600 bytes** for inspection; a larger AI context setting cannot recover missing payload bytes. No stream reassembly, automated TLS decryption, or host-level intrusion verification is provided.
 
 
 **Neutral analysis and infrastructure context:** Report generation and chat now begin with ordinary network behavior and infrastructure relationships instead of assuming an incident. High packet counts, SYN bursts, TCP resets, authentication errors, and scanner-like patterns remain observable facts, but are **not automatically called attacks**. Packet-level heuristics are leads to interpret in context, not verified security findings. A proxy often appears as the source of backend connections, and a Docker gateway can resemble another host; neither identity is provable from a private IP alone.
@@ -135,13 +135,13 @@ credentials. Rebuild with `docker compose up -d --build --force-recreate`.
 
 ## Packet inspection, large uploads and remote export
 
-- **Uploads:** `.pcap` and `.pcapng` are processed incrementally (no full-file buffering). Default maximum is `MAX_UPLOAD_MB=256`; raise/lower this in `.env`, then recreate the container. The packet count remains capped at the first 100,000 packets. Captures are held in memory and expire after 30 minutes without access.
+- **Uploads:** `.pcap` and `.pcapng` are parsed incrementally and written to a disk-backed SQLite index (`/data/captures`, in the existing Docker volume). Default maximum upload is `MAX_UPLOAD_MB=256`; storage cap per capture index is `MAX_CAPTURE_STORE_MB=768` MiB. To accept larger uploads, adjust both settings and ensure enough free disk space. **All packets are indexed**, including those after 100,000; the UI displays only one page of 100 packets. Search uses indexed SQL filters where possible. Uploads retain up to 1,600 bytes per packet for detail inspection; remote capture stores complete frame bytes for PCAP download until its configured byte budget. Temporary indexes expire with sessions and are deleted on app restart; saved network maps/SSH data are untouched.
 - **Packet detail:** Click a row to view Ethernet/IP/TCP/UDP/ICMP headers, a readable ASCII payload excerpt, and hex+ASCII bytes. Uploaded packets store the first 1,600 captured bytes for browsing; this is not full Wireshark stream reconstruction or decryption.
 - **Ask AI about a packet:** Open its detail drawer and click **Use packet in AI question**. Nothing is sent to the model until you click **Ask AI**. The selected packet's decoded headers, up to 1,600 characters of readable payload and a short hex prefix are included **in addition to** the automatic representative packet samples. **Cloud users:** both automatically sampled and manually attached text can contain passwords, tokens, or private network content; removing an attachment does not disable automatic payload samples. Set `AI_PAYLOAD_CHARS=0` to disable automatic payload excerpts (names/URIs may still appear in parsed metadata).
 - **Remote capture download:** **Download remote PCAP** exports a classic `.pcap` file containing complete captured frames. You can download while capture is in progress (snapshot) or after it finishes. A remote capture is capped at `MAX_REMOTE_CAPTURE_MB=128` MiB to bound container RAM usage; captured frames within that limit are not truncated.
 - **SSH:** Hostname and username are remembered in your browser's localStorage (not in server files). This does not store a password or private key.
 - **Report JSON:** When using hosted Mistral, the report generator requests JSON mode. It also tolerates unescaped line breaks inside model strings. If a model still outputs unusable JSON, the page shows an explicitly labeled unstructured fallback instead of a 400/502 error.
-- **Operational note:** Large captures and remote PCAP snapshots are held in memory. Restrict access through Docker/firewall, especially since the app has no login or HTTP Host allowlist.
+- **Operational note:** Large captures are indexed on the disk-backed Docker volume, not held entirely in application RAM. Downloading remote PCAP snapshots can still consume browser RAM (remote captures are limited by `MAX_REMOTE_CAPTURE_MB`). Restrict access through Docker/firewall, especially since the app has no login or HTTP Host allowlist.
 
 ## Persistent Network Mapping (manual Nmap scans)
 
@@ -197,3 +197,11 @@ credentials are configured. No Nmap arguments are built with a shell; subnets
 are validated before invoking Nmap. Nmap inventory names, service banners, and
 notes are passed to the AI only when you select the map and are treated as
 untrusted data.
+
+### Performance and AI on large captures
+
+Packet search uses a disk-backed SQLite index with only a single page returned per request. The dashboard summary counts **every imported packet**. There is **no packet-count truncation**; maximum file size and per-session disk usage are still bounded. Expect storage overhead for metadata and indexes above the original PCAP file size. A very large substring search can still take longer than an indexed host/port/protocol query.
+
+AI reports and chat do not send or read millions of packet contents into a single prompt. For large captures they use a bounded, **capture-wide sample (up to approximately 25,000 decoded packets)** plus full-capture summary counts and additional recent/host-matched examples. The AI receives `context_scope` describing the sample and must not treat sampled behavior as a proven full-capture count. You can explicitly attach any packet number, including after 100,000, to an AI question. Evidence in unsampled packets may still be missed; use filters to narrow investigations.
+
+**Storage:** Capture indexes are temporary and stored under `/data/captures`. Saved network inventories and SSH keys continue to persist in `/data` in their own paths. Never use `docker compose down -v` unless you want to remove those permanent records. If the upload fails due to disk limits, raise `MAX_CAPTURE_STORE_MB` or `MAX_UPLOAD_MB` and make sure the Docker volume has sufficient capacity.

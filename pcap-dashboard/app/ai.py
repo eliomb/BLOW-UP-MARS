@@ -164,6 +164,10 @@ SYSTEM = """You are a careful, NEUTRAL network traffic analyst. A PCAP is not ev
 of an attack merely because somebody asked for analysis. Describe what traffic
 actually does; do not assume an incident, a victim, or hostile intent. A normal
 or inconclusive assessment is a valid and often correct outcome.
+For large captures, context_scope can describe a sampled subset of packets.
+Only full_capture_statistics describes whole-capture totals; never extrapolate
+sample-only traffic or attack counts to the whole capture or infer that
+unsampled packets must be normal. Report uncertainty clearly.
 
 If selected_network_maps is present, use their explicit user-selected Nmap inventories as supplementary context. Separate timestamped scan observations, operator-provided labels, and PCAP evidence. Never treat an Nmap port or a missing host as proof of containerization, an attack or its absence.
 Start by interpreting infrastructure_context: operator-provided Docker networks,

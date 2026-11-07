@@ -6,7 +6,7 @@ PROTO = {'dns': 'DNS', 'http': 'HTTP', 'tls': 'TLS', 'ssl': 'TLS', 'https': 'TLS
 STOP = set("""show me all find get list give packets packet pkts traffic the a an of with that are is from to and or only any
 which have has in on by for between port ports ip address addresses bytes byte than larger bigger smaller greater less more over
 under above below containing contains contain including matching mentioning search look looking where what who whose sent
-received connections connection requests request responses response data please can you i want see display filter queries query""".split())
+received connections connection requests request responses response data please can you i want see display filter queries query size length""".split())
 IP = r'(\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?)'
 PK = '|'.join(sorted(PROTO, key=len, reverse=True))
 

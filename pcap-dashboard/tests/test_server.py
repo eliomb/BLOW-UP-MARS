@@ -12,6 +12,9 @@ class Endpoints(unittest.TestCase):
         self.base = f'http://127.0.0.1:{self.srv.server_port}'
     def tearDown(self):
         self.srv.shutdown(); self.srv.server_close()
+        with server.LOCK:
+            active = list(server.SESS.values()); server.SESS.clear()
+        for item in active: server.discard(item)
     def request(self, path, obj=None):
         data = json.dumps(obj).encode() if obj is not None else None
         req = urllib.request.Request(self.base+path, data=data, headers={

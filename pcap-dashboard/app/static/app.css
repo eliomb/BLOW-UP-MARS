@@ -121,3 +121,17 @@ textarea{flex:1;font-family:ui-monospace,Consolas,monospace;font-size:12px;resiz
 .map-manual-form label{color:var(--mu);font-size:12px;flex:0 0 100%}
 .map-manual-form input{min-width:125px;flex:1 1 150px}
 .map-manual-form select{flex:0 1 200px}
+
+/* Packet search: explicit controls with responsive, debounced filtering. */
+.search-form{display:flex;align-items:end;gap:10px;flex-wrap:wrap}
+.search-form label{display:flex;flex-direction:column;gap:5px;color:var(--mu);font-size:12px;min-width:94px}
+.search-form label.search-main{flex:1 1 340px;min-width:210px}
+.search-form input#q{width:100%;min-width:0}
+.search-form #filter-port{width:106px}
+.search-form select,.search-form input[type=number]{height:47px;padding:10px;background:var(--pn);color:var(--tx);border:1px solid var(--ln);border-radius:8px;font:inherit;font-size:14px}
+.search-form button{height:47px}
+.search-form #search-clear{background:transparent;border:1px solid var(--ln);color:var(--tx);padding:0 16px}
+.search-help{margin:7px 0 0;line-height:1.5}
+.search-help code{color:var(--ac)}
+.search-busy{opacity:.5}
+@media(max-width:580px){.search-form label.search-main{flex-basis:100%}.search-form button{flex:1}}

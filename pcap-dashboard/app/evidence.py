@@ -245,6 +245,8 @@ def choose_samples(packets, enriched, question, capacity):
     def add(indices, reason):
         for i in indices:
             if i not in tagged and 0 <= i < len(packets): tagged[i] = reason
+    # Packet IDs remain their original capture numbers after disk-backed sampling.
+    local_index = {p.get('n', i) + 1: i for i, p in enumerate(packets)}
     hostnames = indexed_hosts(question)
     ports = indexed_ports(question)
     if hostnames or ports:
@@ -258,9 +260,9 @@ def choose_samples(packets, enriched, question, capacity):
     for alert in enriched.get('detector_candidates', []):
         for sample in alert.get('examples', [])[:3]:
             if type(sample.get('packet_number')) is int:
-                pattern_indices.append(sample['packet_number'] - 1)
+                pattern_indices.append(local_index.get(sample['packet_number'], -1))
         for advert in alert.get('advertised_macs', [])[:3]:
-            pattern_indices.extend(n - 1 for n in advert.get('example_packet_numbers', [])[:3])
+            pattern_indices.extend(local_index.get(n, -1) for n in advert.get('example_packet_numbers', [])[:3])
     add(pattern_indices[:min(15, capacity//3)], 'pattern_example')
     scan_sources = {item['source'] for item in enriched['detector_candidates'][:5] if item.get('source')}
     if scan_sources:
@@ -349,7 +351,7 @@ def build(packets, raw, question='', selected=None, selected_maps=None):
         'Parsed the loaded capture; packet excerpts are a bounded sample, not every payload or a reconstructed TCP stream.',
         'Some packets may be snaplen-truncated; packet detail samples indicate truncation.',
         'No automatic TLS/SSH decryption, external threat intelligence or confirmation of exploit success.',
-        'Only packets retained by the dashboard are analyzed (normally first 100,000 packets).'
+        'Detailed evidence may be a representative subset of the complete disk-backed capture; consult context_scope before generalizing.'
     ]
     # Place operator topology and neutral infrastructure hypotheses before
     # security-oriented patterns; this prevents ordinary proxy/container flows

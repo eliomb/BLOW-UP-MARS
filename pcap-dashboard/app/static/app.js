@@ -34,9 +34,9 @@ async function upload(f) {
       req.onabort = () => reject(new Error('Upload canceled.'));
       req.send(f);
     });
-    sid = j.id; $('fname').textContent = f.name + (j.truncated ? ' (first 100,000 packets)' : '');
+    sid = j.id; $('fname').textContent = f.name;
     $('land').hidden = true; $('dash').hidden = false; $('again').hidden = false;
-    $('remote-download').hidden = true; summary(j.stats); $('q').value = ''; search(0); resetAI();
+    $('remote-download').hidden = true; summary(j.stats); clearFilters(false); search(0); resetAI();
   } catch (e) {
     $('err').textContent = e.message;
     $('drop').firstElementChild.textContent = 'Ask your packet capture a question.';
@@ -58,12 +58,31 @@ function summary(s) {
     list.slice(0, 4).forEach(([ip, n]) => { const r = el('div', 'tk', ip); r.append(el('span', '', n.toLocaleString())); r.onclick = () => ask(pre + ip); t.append(r); }); });
 }
 function ask(q) { $('q').value = q; search(0); }
+let searchToken = 0, searchTimer = 0;
+function clearFilters(run = true) {
+  $('q').value = ''; $('filter-proto').value = ''; $('filter-port').value = '';
+  if (run) search(0);
+}
+function delayedSearch() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => search(0), 450);
+}
 async function search(o) {
+  if (!sid) return;
+  const token = ++searchToken;
   off = o; $('err').textContent = '';
+  $('count').textContent = 'Filtering packets…';
+  const url = new URLSearchParams({id:sid, q:$('q').value, proto:$('filter-proto').value,
+    port:$('filter-port').value, offset:String(o), limit:String(PAGE)});
   try {
-    const j = await api(`/api/packets?id=${encodeURIComponent(sid)}&q=${encodeURIComponent($('q').value)}&offset=${o}&limit=${PAGE}`); total = j.total;
-    const ch = $('chips'); ch.replaceChildren(); j.filters.forEach(f => ch.append(el('span', 'chip', f)));
-    $('count').textContent = `${total.toLocaleString()} matching packets` + (total > PAGE ? ` · showing ${o + 1}–${Math.min(total, o + PAGE)}` : '');
+    const j = await api(`/api/packets?${url}`);
+    if (token !== searchToken) return; // Don't let slow queries overwrite newer results.
+    total = j.total;
+    const ch = $('chips'); ch.replaceChildren();
+    j.filters.forEach(f => ch.append(el('span', 'chip', f)));
+    if ($('filter-proto').value) ch.append(el('span','chip',`protocol: ${$('filter-proto').value}`));
+    if ($('filter-port').value) ch.append(el('span','chip',`port: ${$('filter-port').value}`));
+    $('count').textContent = `${total.toLocaleString()} matching packets` + (total > 0 ? ` · showing ${o + 1}–${Math.min(total, o + PAGE)}` : '');
     $('prev').disabled = o === 0; $('next').disabled = o + PAGE >= total;
     const tb = $('rows'); tb.replaceChildren();
     j.rows.forEach(r => { const tr = el('tr'); const a = (ip, p) => ip ? ip + (p ? ':' + p : '') : '–';
@@ -71,8 +90,8 @@ async function search(o) {
       if (hostLabelText(r.src)) tr.children[2].title = hostLabelText(r.src);
       if (hostLabelText(r.dst)) tr.children[3].title = hostLabelText(r.dst);
       tr.onclick = () => detail(r.n); tb.append(tr); });
-    if (!j.rows.length) { const tr = el('tr'), td = el('td', '', 'No packets match. Try a protocol, an IP address, a port, or a quoted word.'); td.colSpan = 7; tr.append(td); tb.append(tr); }
-  } catch (e) { $('err').textContent = e.message; }
+    if (!j.rows.length) { const tr = el('tr'), td = el('td', '', 'No matching packets. Try clearing filters, entering an IP, or selecting a protocol.'); td.colSpan = 7; tr.append(td); tb.append(tr); }
+  } catch (e) { if (token === searchToken) { $('err').textContent = e.message; $('count').textContent = 'Search failed'; } }
 }
 async function detail(n) {
   try {
@@ -110,7 +129,12 @@ async function detail(n) {
 $('drop').onclick = () => $('file').click(); $('drop').addEventListener('keydown', e => { if (e.target === $('drop') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); $('file').click(); } });
 $('file').onchange = e => upload(e.target.files[0]);
 ['dragover', 'dragleave', 'drop'].forEach(t => $('drop').addEventListener(t, e => { e.preventDefault(); $('drop').classList.toggle('over', t === 'dragover'); if (t === 'drop') upload(e.dataTransfer.files[0]); }));
-$('f').onsubmit = e => { e.preventDefault(); search(0); };
+$('f').onsubmit = e => { e.preventDefault(); clearTimeout(searchTimer); search(0); };
+$('q').addEventListener('input', delayedSearch);
+$('filter-proto').addEventListener('change', () => search(0));
+$('filter-port').addEventListener('input', delayedSearch);
+$('search-clear').onclick = () => { clearTimeout(searchTimer); clearFilters(); $('q').focus(); };
+$('q').addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); clearFilters(); } });
 $('prev').onclick = () => search(Math.max(0, off - PAGE)); $('next').onclick = () => search(off + PAGE);
 $('close').onclick = () => $('drawer').hidden = true; document.addEventListener('keydown', e => { if (e.key === 'Escape') $('drawer').hidden = true; });
 $('again').onclick = () => { location.reload(); };
@@ -332,7 +356,7 @@ $('forget').onclick = guard(async () => { await post('/api/ssh/forget', conn());
 $('ifs').onclick = guardHk(async () => { msg('Connecting…'); const j = await post('/api/ssh/interfaces', conn()), s = $('iface'); s.replaceChildren();
   j.interfaces.forEach(i => { const o = el('option', '', i); o.value = i; s.append(o); }); msg(j.interfaces.length - 1 + ' interfaces found.'); });
 $('start').onclick = guardHk(async () => { const j = await post('/api/live/start', { ...conn(), iface: $('iface').value, filter: $('bpf').value.trim(), seconds: +$('secs').value || 300 });
-  sid = j.id; live = true; $('remote-download').hidden = false; $('land').hidden = true; $('dash').hidden = false; $('again').hidden = false; $('stop').hidden = false; $('q').value = '';
+  sid = j.id; live = true; $('remote-download').hidden = false; $('land').hidden = true; $('dash').hidden = false; $('again').hidden = false; $('stop').hidden = false; clearFilters(false);
   resetAI(); $('fname').textContent = `● Live · ${$('user').value}@${$('host').value} · ${$('iface').value}`; timer = setInterval(poll, 2000); poll(); });
 async function poll() { try { const j = await api('/api/live/status?id=' + encodeURIComponent(sid)); summary(j.stats); await search(off);
   if (!j.running) { clearInterval(timer); live = false; $('stop').hidden = true; $('fname').textContent += j.error ? ' · stopped: ' + j.error : ' · finished'; }

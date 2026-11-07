@@ -7,11 +7,12 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     tmpfs: ["/tmp:size=16m,noexec,nosuid,nodev"]
-    volumes: ["wirelight-data:/data"]   # SSH keys + trusted host keys (only writable location)
+    volumes: ["wirelight-data:/data"]   # SSH keys, saved maps and temporary capture indexes
     extra_hosts:
       - "host.docker.internal:host-gateway" # Optional LM Studio on Docker host (local mode)
     environment:
       MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-256}"
+      MAX_CAPTURE_STORE_MB: "${MAX_CAPTURE_STORE_MB:-768}"
       MAX_REMOTE_CAPTURE_MB: "${MAX_REMOTE_CAPTURE_MB:-128}"
       AI_ENABLED: "${AI_ENABLED:-true}"
       AI_PROVIDER: "${AI_PROVIDER:-mistral}"

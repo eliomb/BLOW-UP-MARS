@@ -30,7 +30,7 @@
  <p id="maps-message" role="status"></p>
 </section>
 <section id="land"><div class="tabs"><button id="t1" class="on">Upload file</button><button id="t2">Remote capture</button></div>
-<div id="drop" tabindex="0" role="button" aria-label="Choose a capture file"><h1>Ask your packet capture a question.</h1><p>Drop a .pcap or .pcapng file here, or click to choose one. Large files are streamed and analyzed in memory (up to the configured upload limit).</p><input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden><p id="upload-status" role="status" class="hint"></p><p id="err" role="alert"></p></div>
+<div id="drop" tabindex="0" role="button" aria-label="Choose a capture file"><h1>Ask your packet capture a question.</h1><p>Drop a .pcap or .pcapng file here, or click to choose one. Large files are streamed into a disk-backed packet index. All packets remain searchable within the configured upload and disk limits.</p><input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden><p id="upload-status" role="status" class="hint"></p><p id="err" role="alert"></p></div>
 <div id="remote" hidden>
  <div class="panel"><h2>1. SSH key</h2><div class="row"><select id="ksel" aria-label="SSH key"></select><button id="kdel">Delete</button><input id="kname" placeholder="new key name" maxlength="32"><button id="kgen">Generate key</button></div>
  <p class="hint">Run this on the server you want to capture from, as the SSH user. The private key never leaves the container volume.</p><div class="row"><textarea id="kcmd" readonly rows="3"></textarea><button id="kcopy">Copy</button></div><p class="hint" id="kfp"></p></div>
@@ -62,8 +62,15 @@
   <div class="ai-bottom"><div><h3>Incident narrative</h3><p id="ai-narrative"></p></div><div><h3>Recommended next steps</h3><ul id="ai-steps"></ul></div></div>
   <details><summary>Evidence, limitations and AI provenance</summary><div id="ai-limits"></div></details></div>
  </section>
- <section class="search"><form id="f"><input id="q" autocomplete="off" maxlength="300" placeholder="Try: dns queries for example.com, or tcp syn to port 443 larger than 1000 bytes"><button>Search</button></form>
- <div id="chips"></div><div id="ex"></div></section>
+ <section class="search" aria-label="Packet filters">
+  <form id="f" class="search-form" role="search">
+   <label class="search-main">Find packets<input id="q" type="search" autocomplete="off" maxlength="300" placeholder="IP, hostname, 443, HTTP path, or tcp syn to port 443" aria-label="Find packets"></label>
+   <label>Protocol<select id="filter-proto"><option value="">All protocols</option><option>TCP</option><option>UDP</option><option>DNS</option><option>HTTP</option><option>TLS</option><option>ICMP</option><option>ICMPv6</option><option>ARP</option></select></label>
+   <label>Port<input id="filter-port" type="number" min="0" max="65535" placeholder="Any" aria-label="Port filter"></label>
+   <button id="search-apply" type="submit" class="go">Filter</button><button id="search-clear" type="button">Clear</button>
+  </form>
+  <p class="hint search-help">Search updates automatically as you type. Try <code>10.0.1.9</code>, <code>443</code>, <code>src:10.0.1.9</code>, or advanced filters like <code>tcp syn to port 443</code>. Press Esc to clear.</p>
+  <div id="chips"></div><div id="ex"></div></section>
  <section class="tbl"><div class="meta"><span id="count"></span><span><button id="prev">Prev</button> <button id="next">Next</button></span></div>
  <div class="scroll"><table><thead><tr><th>#</th><th>Time (s)</th><th>Source</th><th>Destination</th><th>Protocol</th><th>Length</th><th>Info</th></tr></thead><tbody id="rows"></tbody></table></div></section>
 </div></main>

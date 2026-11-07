@@ -1,3 +1,4 @@
+import sqlite3
 """SSH key management + remote tcpdump streaming.
 Local commands are argv lists (never a shell). Remote arguments are allow-listed AND shlex-quoted.
 Private keys never leave DATA_DIR/keys and are never returned by any API or written to logs."""
@@ -110,7 +111,7 @@ def live(s, c, iface, flt, secs):
 def _pump(s, secs):
     L = s['live']; p = L['proc']; sp = pcap.Stream(); end = time.time() + secs
     try:
-        while not L['stop'] and time.time() < end and len(s['pk']) < pcap.MAXPKT:
+        while not L['stop'] and time.time() < end:
             if select.select([p.stdout], [], [], 1)[0]:
                 d = os.read(p.stdout.fileno(), 65536)
                 if not d: break
@@ -121,12 +122,15 @@ def _pump(s, secs):
                         break
                     # Keep full remote frame bytes so exported PCAPs are not silently truncated.
                     L['bytes_saved'] += len(r[3])
-                    packet = pcap.dissect(len(s['pk']), r)
-                    packet['link'] = r[2]
-                    s['raw'].append(r[3]); s['pk'].append(packet)
-    except ValueError: L['error'] = 'remote did not send a valid pcap stream'
+                    if s.get('store'):
+                        s['store'].append(r, full=True)
+                    else:
+                        packet = pcap.dissect(len(s['pk']), r)
+                        packet['link'] = r[2]
+                        s['raw'].append(r[3]); s['pk'].append(packet)
+    except (ValueError, OSError, sqlite3.Error) as exc: L['error'] = f'Remote capture stopped: {str(exc)[:180]}'
     finally:
-        early = not L['stop'] and time.time() < end and len(s['pk']) < pcap.MAXPKT
+        early = not L['stop'] and time.time() < end
         if early:
             try: p.wait(timeout=3)          # get the real exit status of an unexpected end
             except subprocess.TimeoutExpired: pass
@@ -135,6 +139,9 @@ def _pump(s, secs):
         except OSError: pass
         err = os.read(p.stderr.fileno(), 4096).decode('utf-8', 'replace') if select.select([p.stderr], [], [], 0.5)[0] else ''
         if early and not L['error']: L['error'] = f'capture ended early (exit {rc}): ' + tail(err, 3)
+        if s.get('store'):
+            try: s['store'].finalize()
+            except (OSError, ValueError, sqlite3.Error) as exc: L['error'] = 'Could not finalize packet index: ' + str(exc)[:150]
         L['running'] = False
 
 def stop(s):
