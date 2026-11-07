@@ -94,3 +94,30 @@ textarea{flex:1;font-family:ui-monospace,Consolas,monospace;font-size:12px;resiz
 .ai-attachment button{flex-shrink:0}
 @media(max-width:650px){main{padding:14px}#drawer{padding:16px}#drop{padding:35px 15px}.ai-attachment{flex-wrap:wrap}}
 .ai-attachment[hidden]{display:none}
+
+/* Persistent, manually refreshed network inventory */
+#mapper .map-title{display:flex;align-items:start;justify-content:space-between;gap:16px;margin-bottom:18px}
+#mapper h1{font-size:26px;font-weight:600;margin:0 0 6px}
+#mapper h2{font-size:15px;color:var(--tx)}
+.map-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:16px;margin-bottom:16px}
+.map-form{display:grid;gap:12px;margin:12px 0}.map-form label{display:grid;gap:6px;color:var(--mu);font-size:12px}
+.map-form input,.map-form textarea{width:100%;font-size:13px}.map-form textarea{resize:vertical;min-height:62px}
+#map-list{width:100%;margin:8px 0 10px}.map-context{margin-bottom:16px;border-color:#425575}
+.map-context .row{align-items:center}.map-context select{min-width:220px;flex:1}
+.map-context strong{font-size:13px}.map-hosts{display:grid;gap:10px;margin-top:14px}
+.map-host{border:1px solid var(--ln);background:#121b2a;border-radius:9px;padding:12px}
+.map-host-head{display:flex;gap:10px;justify-content:space-between;flex-wrap:wrap;align-items:center}
+.map-host-head code{color:var(--ac)}.map-host-ports{color:var(--mu);font:12px ui-monospace,Consolas,monospace;overflow-wrap:anywhere;margin:8px 0}
+.map-host-controls{display:grid;grid-template-columns:180px minmax(120px,1fr) auto;align-items:center;gap:8px}
+.map-host-controls>*{min-width:0}.map-host-controls input{width:100%}
+#maps-message.bad,#map-status.bad{color:#f08a7a}
+@media(max-width:640px){.map-host-controls{grid-template-columns:1fr}.map-title{flex-wrap:wrap}}
+
+.map-context-controls{align-items:center}.map-context-controls #map-context{flex:1;display:flex;gap:6px 14px;flex-wrap:wrap;align-items:center}
+.map-check{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--tx);padding:7px 10px;border:1px solid var(--ln);border-radius:7px;cursor:pointer}
+.map-check:has(input:checked){border-color:var(--ac);background:#343328}.map-check input{accent-color:var(--ac)}
+
+.map-manual-form{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0 18px}
+.map-manual-form label{color:var(--mu);font-size:12px;flex:0 0 100%}
+.map-manual-form input{min-width:125px;flex:1 1 150px}
+.map-manual-form select{flex:0 1 200px}

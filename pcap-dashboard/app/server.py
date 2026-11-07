@@ -1,7 +1,7 @@
 import collections, json, os, secrets, threading, time, subprocess, struct, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
-import nlq, pcap, ssh, ai, evidence
+import nlq, pcap, ssh, ai, evidence, networkmap
 
 MAX_UP = max(1, min(512, int(os.environ.get('MAX_UPLOAD_MB', '256')))) * 2 ** 20
 TTL, MAX_SESS = 1800, 4
@@ -76,6 +76,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == '/healthz': return self.out(200, {'ok': True})
         if u.path == '/api/upload/config': return self.out(200, {'max_bytes': MAX_UP})
         if u.path == '/api/keys': return self.out(200, {'keys': ssh.keys()})
+        if u.path == '/api/maps': return self.out(200, {'maps': networkmap.list_maps()})
+        if u.path == '/api/maps/detail': return self.out(200, {'map': networkmap.detail(q.get('id', ''))})
+        if u.path == '/api/maps/status': return self.out(200, networkmap.status(q.get('id', '')))
         if u.path == '/api/ai/config':
             cfg = ai.config()
             return self.out(200, {'enabled': cfg['enabled'], 'configured': cfg['configured'],
@@ -159,10 +162,26 @@ class H(BaseHTTPRequestHandler):
             return self.out(200, dict(id=sid, stats=stats(pk),
                                       truncated=len(pk) >= pcap.MAXPKT))
         b = self.jbody()
+        if p == '/api/maps/create':
+            return self.out(200, {'map': networkmap.create(b.get('name', ''), b.get('subnet', ''), b.get('notes', ''))})
+        if p == '/api/maps/update':
+            return self.out(200, {'map': networkmap.update(b.get('id', ''), b.get('name', ''), b.get('notes', ''))})
+        if p == '/api/maps/host':
+            return self.out(200, {'label': networkmap.label_host(b.get('id', ''), b.get('ip', ''), b.get('role', 'unknown'), b.get('notes', ''))})
+        if p == '/api/maps/delete':
+            networkmap.delete(b.get('id', ''))
+            return self.out(200, {'ok': True})
+        if p == '/api/maps/scan':
+            return self.out(202, networkmap.start_scan(b.get('id', ''), b.get('skip_discovery', False)))
         if p in ('/api/ai/analyze', '/api/ai/ask'):
             s = session(str(b.get('id', '')))
             if not s: return self.out(404, {'error': 'Session expired. Start again.'})
             question = b.get('question', '')
+            map_ids = b.get('map_ids', [])
+            if (not isinstance(map_ids, list) or len(map_ids) > 4 or
+                    any(not isinstance(x, str) or not x or len(x) > 60 for x in map_ids) or
+                    len(set(map_ids)) != len(map_ids)):
+                raise ValueError('Select up to four distinct saved network maps')
             numbers = b.get('packet_numbers', []) if p == '/api/ai/ask' else []
             if not isinstance(numbers, list) or len(numbers) > 3 or any(type(x) is not int for x in numbers):
                 raise ValueError('Select up to three packet numbers to share with AI')
@@ -175,9 +194,11 @@ class H(BaseHTTPRequestHandler):
                 raws = s['raw'][:]
                 history = s.get('ai_chat', [])[:]
             try:
+                selected_maps = [networkmap.context(map_id, packets) for map_id in map_ids]
                 context = evidence.build(packets, raws,
                                          question if p == '/api/ai/ask' else '',
-                                         numbers if p == '/api/ai/ask' else [])
+                                         numbers if p == '/api/ai/ask' else [],
+                                         selected_maps)
                 if p == '/api/ai/analyze':
                     report = ai.analyze(context)
                     with LOCK: s['ai_report'] = report

@@ -68,6 +68,8 @@ async function search(o) {
     const tb = $('rows'); tb.replaceChildren();
     j.rows.forEach(r => { const tr = el('tr'); const a = (ip, p) => ip ? ip + (p ? ':' + p : '') : '–';
       [r.n + 1, r.t.toFixed(6), a(r.src, r.sport), a(r.dst, r.dport), r.proto, r.len, r.info].forEach((v, i) => { const td = el('td', '', v); if (i === 4) { td.className = 'pt'; td.style.color = col(r.proto); } tr.append(td); });
+      if (hostLabelText(r.src)) tr.children[2].title = hostLabelText(r.src);
+      if (hostLabelText(r.dst)) tr.children[3].title = hostLabelText(r.dst);
       tr.onclick = () => detail(r.n); tb.append(tr); });
     if (!j.rows.length) { const tr = el('tr'), td = el('td', '', 'No packets match. Try a protocol, an IP address, a port, or a quoted word.'); td.colSpan = 7; tr.append(td); tb.append(tr); }
   } catch (e) { $('err').textContent = e.message; }
@@ -80,6 +82,8 @@ async function detail(n) {
     const dl = $('dl'); dl.replaceChildren();
     [['Time', new Date(p.ts * 1000).toISOString()], ['Length', p.len + ' bytes'],
       ['Source', p.src + (p.sport ? ':' + p.sport : '')], ['Destination', p.dst + (p.dport ? ':' + p.dport : '')],
+      ...(hostLabelText(p.src) ? [['Source role', hostLabelText(p.src)]] : []),
+      ...(hostLabelText(p.dst) ? [['Destination role', hostLabelText(p.dst)]] : []),
       ['Transport', p.tr], ['TCP flags', p.flags || '–'], ['Info', p.info]]
       .forEach(([k, v]) => dl.append(el('dt', '', k), el('dd', '', v)));
     const layers = $('packet-layers'); layers.replaceChildren();
@@ -111,6 +115,180 @@ $('prev').onclick = () => search(Math.max(0, off - PAGE)); $('next').onclick = (
 $('close').onclick = () => $('drawer').hidden = true; document.addEventListener('keydown', e => { if (e.key === 'Escape') $('drawer').hidden = true; });
 $('again').onclick = () => { location.reload(); };
 ['dns queries', 'tcp syn to port 443', 'http from 10.0.0.5', 'larger than 1000 bytes', 'tcp resets', 'first 20 not tls', 'ping'].forEach(q => { const s = el('span', 'ex', q); s.onclick = () => ask(q); $('ex').append(s); });
+
+// ---- user-triggered, persistent Nmap inventory ----
+function selectedMapIds() { return [...$('map-context').querySelectorAll('input:checked')].map(c => c.value); }
+let networkHostRoles = {}, hostLabelRevision = 0;
+async function refreshHostLabels() {
+  const revision = ++hostLabelRevision;
+  const maps = await Promise.all(selectedMapIds().map(id => api(`/api/maps/detail?id=${encodeURIComponent(id)}`)));
+  if (revision !== hostLabelRevision) return;
+  networkHostRoles = {};
+  for (const {map} of maps) Object.assign(networkHostRoles, map.labels);
+  if (sid) search(off); // update host-label tooltips in the displayed PCAP table
+  // The inventory is never used to silently override observed packet endpoints.
+}
+function hostLabelText(ip) {
+  const label = networkHostRoles[ip];
+  return label ? `${label.role}${label.notes ? ' — ' + label.notes : ''} (operator label)` : '';
+}
+let mapCache = [], currentMap = '', mapTimer = null, showingMaps = false;
+const mapRoles = ['unknown', 'physical server', 'virtual machine', 'lxc container',
+  'docker host', 'docker container', 'reverse proxy', 'router', 'firewall',
+  'database server', 'application server', 'other'];
+for (const name of mapRoles) { const option = el('option', '', name); option.value = name; $('map-manual-role').append(option); }
+$('map-manual-host').onsubmit = async event => {
+  event.preventDefault(); if (!currentMap) return;
+  try {
+    const ip = $('map-manual-ip').value.trim();
+    await post('/api/maps/host', { id: currentMap, ip, role: $('map-manual-role').value, notes: $('map-manual-notes').value });
+    $('map-manual-ip').value = ''; $('map-manual-notes').value = '';
+    await loadMapDetail();
+    await refreshHostLabels();
+    mapNotice(`Saved operator label for ${ip}; it will survive rescans.`);
+  } catch (err) { mapNotice(err.message, true); }
+};
+function mapNotice(text, bad=false) {
+  const out = $('maps-message'); out.textContent = text; out.className = bad ? 'bad' : '';
+}
+function mapScanNotice(text, bad=false) {
+  $('map-status').textContent = text; $('map-status').className = bad ? 'bad' : 'hint';
+}
+function showMapPanel(open) {
+  showingMaps = open;
+  $('mapper').hidden = !open;
+  $('land').hidden = open || !!sid;
+  $('dash').hidden = open || !sid;
+  $('map-open').hidden = open;
+  if (open) { loadMaps().catch(e => mapNotice(e.message, true)); window.scrollTo(0, 0); }
+  else window.scrollTo(0, 0);
+}
+$('map-open').onclick = $('map-manage').onclick = () => showMapPanel(true);
+$('maps-back').onclick = () => showMapPanel(false);
+async function loadMaps(prefer) {
+  const result = await api('/api/maps');
+  mapCache = result.maps;
+  const combo = $('map-list');
+  const last = prefer !== undefined ? prefer : (currentMap || combo.value);
+  combo.replaceChildren(el('option', '', 'Select a saved map'));
+  combo.options[0].value = '';
+  for (const map of mapCache) { const option = el('option', '', `${map.name} · ${map.subnet}`); option.value = map.id; combo.append(option); }
+  combo.value = mapCache.some(m => m.id === last) ? last : '';
+  currentMap = combo.value;
+  const aiSelect = $('map-context'), selected = new Set(selectedMapIds());
+  aiSelect.replaceChildren();
+  if (!mapCache.length) aiSelect.append(el('span', 'hint', 'No saved maps yet — PCAP only'));
+  for (const map of mapCache) {
+    const label = el('label', 'map-check'), checkbox = document.createElement('input');
+    checkbox.type = 'checkbox'; checkbox.value = map.id;
+    checkbox.checked = selected.has(map.id);
+    checkbox.onchange = () => {
+      if (selectedMapIds().length > 4) {
+        checkbox.checked = false; alert('Select at most four network maps per analysis.');
+      }
+      refreshHostLabels().catch(() => {});
+    };
+    label.append(checkbox, document.createTextNode(` ${map.name} (${map.subnet})`)); aiSelect.append(label);
+  }
+  refreshHostLabels().catch(() => {});
+  if (currentMap) await loadMapDetail();
+  else { $('map-detail').hidden = true; $('map-host-panel').hidden = true; }
+}
+$('map-list').onchange = async () => { currentMap = $('map-list').value; try {
+  if (currentMap) await loadMapDetail();
+  else { $('map-detail').hidden = true; $('map-host-panel').hidden = true; }
+} catch(e) { mapNotice(e.message, true); } };
+$('map-create').onsubmit = async e => {
+  e.preventDefault();
+  try {
+    const j = await post('/api/maps/create', { name: $('map-new-name').value, subnet: $('map-new-subnet').value, notes: $('map-new-notes').value });
+    $('map-new-name').value = ''; $('map-new-subnet').value = ''; $('map-new-notes').value = '';
+    await loadMaps(j.map.id); mapNotice('Map saved. Click Scan / Rescan to run Nmap (no automatic scanning).');
+  } catch (err) { mapNotice(err.message, true); }
+};
+$('map-edit').onsubmit = async e => { e.preventDefault(); if (!currentMap) return;
+  try { await post('/api/maps/update', { id:currentMap, name:$('map-edit-name').value, notes:$('map-edit-notes').value });
+    await loadMaps(currentMap); mapNotice('Map description updated.'); }
+  catch(err) { mapNotice(err.message, true); }
+};
+$('map-use').onclick = () => { if (!currentMap) return;
+  if (!sid) { mapNotice('Map selected; open a PCAP or remote capture, then choose it in Network inventory context.'); return; }
+  const selected = [...$('map-context').querySelectorAll('input:checked')];
+  if (!selected.some(c => c.value === currentMap) && selected.length >= 4) {
+    mapNotice('Uncheck another map first (four-map limit).', true); return;
+  }
+  const checkbox = [...$('map-context').querySelectorAll('input')].find(c => c.value === currentMap);
+  if (checkbox) checkbox.checked = true;
+  refreshHostLabels().catch(() => {});
+  mapNotice('Map selected for AI questions and reports on the loaded capture.'); showMapPanel(false);
+};
+$('map-delete').onclick = async () => { if (!currentMap || !confirm('Permanently delete this saved map and its manual host labels?')) return;
+  try { await post('/api/maps/delete', {id: currentMap}); currentMap = ''; await loadMaps(''); mapNotice('Saved map deleted.'); }
+  catch(e) { mapNotice(e.message, true); }
+};
+function hostRow(ip, info, label) {
+  const box = el('div', 'map-host'); const head = el('div', 'map-host-head');
+  head.append(el('code', '', ip)); head.append(el('span', 'hint', info ? `Nmap: ${info.state}` : 'Not found in latest scan · label retained'));
+  box.append(head);
+  if (info) {
+    const desc = [info.hostnames?.join(', '), info.mac, ...info.ports.map(p => `${p.port}/${p.protocol} ${p.service} ${p.product} ${p.version}`)].filter(Boolean).join(' · ');
+    box.append(el('p', 'map-host-ports', desc || 'No open ports identified'));
+  }
+  const row = el('div', 'map-host-controls'), role = el('select'), notes = el('input'), save = el('button', '', 'Save label');
+  notes.placeholder = 'Host notes (e.g. nested Docker/LXC)'; notes.maxLength = 400;
+  for (const r of mapRoles) { const opt = el('option', '', r); opt.value = r; role.append(opt); }
+  role.value = label?.role || 'unknown'; notes.value = label?.notes || '';
+  save.onclick = async () => { save.disabled = true; try {
+    await post('/api/maps/host', {id:currentMap, ip, role:role.value, notes:notes.value});
+    mapNotice(`Saved role for ${ip}. This is operator-supplied context, not Nmap proof.`);
+  } catch(e) { mapNotice(e.message, true); } finally {save.disabled = false;} };
+  row.append(role, notes, save); box.append(row); return box;
+}
+async function loadMapDetail() {
+  const id = currentMap;
+  const res = await api(`/api/maps/detail?id=${encodeURIComponent(id)}`);
+  if (currentMap !== id) return;
+  const m = res.map; $('map-detail').hidden = false; $('map-host-panel').hidden = false;
+  $('map-edit-name').value = m.name; $('map-edit-notes').value = m.notes;
+  $('map-pn').checked = !!m.skip_discovery;
+  $('map-meta').textContent = `${m.subnet} · last scanned: ${m.scanned_at || 'never'} · ${m.scan_count} scan(s) · ${m.hosts.length} host(s) in last result`;
+  const hosts = $('map-hosts'); hosts.replaceChildren();
+  const added = new Set();
+  for (const h of m.hosts) { hosts.append(hostRow(h.ip, h, m.labels[h.ip])); added.add(h.ip); }
+  for (const [ip, label] of Object.entries(m.labels)) if (!added.has(ip)) hosts.append(hostRow(ip, null, label));
+  if (!hosts.childNodes.length) hosts.append(el('p', 'hint', 'No hosts found yet. Scan the subnet to discover devices. You can then label them for AI context.'));
+  await checkMapScan(id);
+}
+async function checkMapScan(id) {
+  const j = await api(`/api/maps/status?id=${encodeURIComponent(id)}`);
+  if (currentMap !== id) return;
+  const running = j.status === 'running';
+  $('map-scan').disabled = running;
+  mapScanNotice(running ? `Scanning… started ${j.started_at}. Results will be saved when complete.` :
+    j.status === 'failed' ? `Scan failed: ${j.error} (previous results preserved)` :
+    j.status === 'completed' ? `Scan complete: ${j.host_count} hosts found.` :
+    'Ready. Scans run only when you click Scan / Rescan.', j.status === 'failed');
+  if (running) {
+    clearTimeout(mapTimer);
+    mapTimer = setTimeout(async () => {
+      try {
+        const now = await api(`/api/maps/status?id=${encodeURIComponent(id)}`);
+        if (currentMap !== id) return;
+        if (now.status === 'running') await checkMapScan(id);
+        else { await loadMaps(id); if (now.status === 'completed') mapNotice('Nmap scan finished; saved inventory updated.'); }
+      } catch(e) { mapNotice(e.message, true); }
+    }, 2500);
+  }
+}
+$('map-scan').onclick = async () => { if (!currentMap) return;
+  const id = currentMap;
+  $('map-scan').disabled = true;
+  try { await post('/api/maps/scan', {id, skip_discovery: $('map-pn').checked});
+    mapScanNotice('Starting Nmap scan…'); await checkMapScan(id);
+  } catch(e) { mapScanNotice(e.message, true); $('map-scan').disabled = false; }
+};
+// Maps remain opt-in on every AI request, including generated reports.
+loadMaps().catch(() => { /* Network mapping may be unavailable, PCAP viewer continues working. */ });
 
 // ---- remote capture ----
 const post = (u, b) => api(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) });
@@ -299,9 +477,9 @@ async function askAI(event) {
   setAIWorking(true);
   aiStatus(aiProvider === 'mistral' ? 'Asking Mistral AI…' : 'Waiting for local LM Studio model…');
   try {
-    const j = await post('/api/ai/ask', { id: sid, question, packet_numbers: attachedPacket === null ? [] : [attachedPacket] });
+    const j = await post('/api/ai/ask', { id: sid, map_ids: selectedMapIds(), question, packet_numbers: attachedPacket === null ? [] : [attachedPacket] });
     addChatMessage('assistant', j.answer);
-    aiStatus(`Answer used statistics across ${j.packet_count.toLocaleString()} packets and ${j.context_scope?.sampled_packets ?? 0} decoded packet samples${attachedPacket === null ? '' : ` plus selected packet #${attachedPacket + 1}`}. Conclusions require corroboration.`);
+    aiStatus(`Answer${j.context_scope?.selected_network_maps?.length ? ` + maps: ${j.context_scope.selected_network_maps.join(', ')}` : ''} used statistics across ${j.packet_count.toLocaleString()} packets and ${j.context_scope?.sampled_packets ?? 0} decoded packet samples${attachedPacket === null ? '' : ` plus selected packet #${attachedPacket + 1}`}. Conclusions require corroboration.`);
   } catch (e) {
     $('ai-question').value = question;
     aiStatus('Could not get AI answer: ' + e.message, true);
@@ -341,10 +519,10 @@ async function runAI() {
   if (!sid || aiBusy || !aiAvailable) return;
   setAIWorking(true); aiStatus(aiProvider === 'mistral' ? 'Generating optional report through Mistral AI…' : 'Generating optional report through LM Studio…');
   try {
-    const j = await post('/api/ai/analyze', { id: sid });
+    const j = await post('/api/ai/analyze', { id: sid, map_ids: selectedMapIds() });
     if (!j.report) throw new Error('No assessment returned');
     renderAI(j.report);
-    aiStatus(`Report completed · ${j.report.evidence.packet_count.toLocaleString()} packet records correlated · ${j.context_scope?.sampled_packets ?? 0} packet examples sent · ${j.report.generated_utc}`);
+    aiStatus(`Report completed${j.context_scope?.selected_network_maps?.length ? ` · maps: ${j.context_scope.selected_network_maps.join(', ')}` : ''} · ${j.report.evidence.packet_count.toLocaleString()} packet records correlated · ${j.context_scope?.sampled_packets ?? 0} packet examples sent · ${j.report.generated_utc}`);
   } catch (e) { aiStatus('Could not generate report: ' + e.message + '. Packet dashboard remains functional.', true); }
   finally { setAIWorking(false); }
 }

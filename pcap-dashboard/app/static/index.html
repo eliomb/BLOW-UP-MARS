@@ -1,7 +1,34 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Wirelight · PCAP analysis</title><link rel="stylesheet" href="/app.css"></head><body>
-<header><div class="brand"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M2 11h4l2-7 4 14 2-7h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Wirelight</div><span id="fname"></span><button id="stop" hidden>Stop capture</button><button id="remote-download" hidden>Download remote PCAP</button><button id="again" hidden>Open another capture</button></header>
+<header><div class="brand"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M2 11h4l2-7 4 14 2-7h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Wirelight</div><span id="fname"></span><button id="map-open">Network maps</button><button id="stop" hidden>Stop capture</button><button id="remote-download" hidden>Download remote PCAP</button><button id="again" hidden>Open another capture</button></header>
 <main>
+<section id="mapper" hidden aria-label="Saved network maps">
+ <div class="map-title"><div><h1>Network mapping</h1><p class="hint">Run Nmap on authorized private subnets, save results across restarts, and add operator-confirmed host roles. Scans run only when you click Scan / Rescan.</p></div><button id="maps-back">Back to capture</button></div>
+ <div class="map-grid">
+ <div class="panel"><h2>Save a subnet</h2>
+  <form id="map-create" class="map-form"><label>Map name<input id="map-new-name" placeholder="Home lab" maxlength="80" required></label>
+   <label>IPv4 subnet (up to /24)<input id="map-new-subnet" placeholder="10.0.1.0/24" maxlength="40" required></label>
+   <label>Topology notes (optional)<textarea id="map-new-notes" rows="3" maxlength="1000" placeholder="LXC guests, Docker bridges, trusted infrastructure…"></textarea></label>
+   <button class="go">Save map</button></form>
+  <p class="hint">Private IPv4 networks only; max 256 addresses per scan. Nmap sees hosts reachable from this Wirelight container—not necessarily every host in your network.</p>
+ </div>
+ <div class="panel"><h2>Saved maps</h2>
+  <label for="map-list">Select a map</label><select id="map-list"><option value="">No saved maps</option></select>
+  <div id="map-detail" hidden>
+   <form id="map-edit" class="map-form"><label>Map name<input id="map-edit-name" maxlength="80" required></label>
+    <label>Operator topology notes<textarea id="map-edit-notes" rows="3" maxlength="1000"></textarea></label>
+    <button>Save description</button></form>
+   <p id="map-meta" class="hint"></p>
+   <label class="hint"><input type="checkbox" id="map-pn"> Skip host discovery (-Pn; checks every address, possibly slower)</label>
+   <div class="row"><button id="map-scan" class="go">Scan / Rescan</button><button id="map-use">Use in PCAP inspection</button><button id="map-delete">Delete map</button></div>
+   <p id="map-status" role="status" class="hint"></p>
+  </div>
+ </div></div>
+ <div id="map-host-panel" class="panel" hidden><h2>Hosts and operator labels</h2><p class="hint">Open ports and service banners are Nmap observations. Roles and notes are entered by you, preserved when rescanning, and shared with AI only when you select this map.</p>
+ <form id="map-manual-host" class="map-manual-form"><label for="map-manual-ip">Add a known host in this subnet</label><input id="map-manual-ip" placeholder="172.25.0.2" required maxlength="45"><select id="map-manual-role" aria-label="Host role"></select><input id="map-manual-notes" placeholder="e.g. Docker container running nginx" maxlength="400"><button>Add host label</button></form>
+ <div id="map-hosts" class="map-hosts"></div></div>
+ <p id="maps-message" role="status"></p>
+</section>
 <section id="land"><div class="tabs"><button id="t1" class="on">Upload file</button><button id="t2">Remote capture</button></div>
 <div id="drop" tabindex="0" role="button" aria-label="Choose a capture file"><h1>Ask your packet capture a question.</h1><p>Drop a .pcap or .pcapng file here, or click to choose one. Large files are streamed and analyzed in memory (up to the configured upload limit).</p><input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden><p id="upload-status" role="status" class="hint"></p><p id="err" role="alert"></p></div>
 <div id="remote" hidden>
@@ -17,6 +44,9 @@
  <section class="panels"><div class="panel"><h2>Packets over time</h2><svg id="tl" viewBox="0 0 400 80" preserveAspectRatio="none"></svg></div>
  <div class="panel"><h2>Protocols</h2><div id="bar"></div><div id="legend"></div></div>
  <div class="panel"><h2>Top talkers</h2><div id="talk"></div></div></section>
+ <section class="map-context panel"><label for="map-context"><strong>Network inventory context for AI</strong></label>
+  <div class="row map-context-controls"><div id="map-context" role="group" aria-label="Saved inventory maps"><span class="hint">No saved maps yet — PCAP only</span></div><button id="map-manage" type="button">Manage / scan maps</button></div>
+  <p class="hint">Optional. Check one or more maps (up to four) to include in both AI questions and reports. Nmap scan observations and your confirmed host labels are distinguished from PCAP evidence.</p></section>
  <section class="panel ai-panel" id="ai-section" aria-label="AI questions and findings">
   <div class="ai-heading"><div><h2>✦ Ask AI about this capture</h2><p class="hint">PCAP processing runs locally. AI is contacted only when you ask a question or request a report. The active model receives packet statistics, correlated attack indicators and automatically sampled packet text (which may include sensitive plaintext). Attaching a packet adds extra detail about that packet.</p></div></div>
   <p id="ai-config" class="hint">Checking AI provider configuration…</p>

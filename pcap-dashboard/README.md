@@ -142,3 +142,58 @@ credentials. Rebuild with `docker compose up -d --build --force-recreate`.
 - **SSH:** Hostname and username are remembered in your browser's localStorage (not in server files). This does not store a password or private key.
 - **Report JSON:** When using hosted Mistral, the report generator requests JSON mode. It also tolerates unescaped line breaks inside model strings. If a model still outputs unusable JSON, the page shows an explicitly labeled unstructured fallback instead of a 400/502 error.
 - **Operational note:** Large captures and remote PCAP snapshots are held in memory. Restrict access through Docker/firewall, especially since the app has no login or HTTP Host allowlist.
+
+## Persistent Network Mapping (manual Nmap scans)
+
+Wirelight now has a **Network maps** button in its header. You can save a named
+RFC1918 IPv4 subnet, trigger an Nmap scan when you choose, inspect open ports and
+service hints, and manually label hosts (LXC container, Docker host/container,
+reverse proxy, router, etc.). The data and operator labels are saved to
+`/data/network-maps.json` in the existing persistent `wirelight-data` Docker
+volume. `docker compose down` and rebuilds preserve this volume; **do not run
+`docker compose down -v`** unless you intend to delete the maps and SSH keys.
+
+1. Open **Network maps**, enter a name and CIDR such as `10.0.1.0/24`, and
+   click **Save map**. This creates the inventory without starting a scan.
+2. Click **Scan / Rescan** to run Nmap and replace only that map's latest
+   observed scan results. No scanning happens automatically, including when you
+   upload a PCAP. Network scans run asynchronously and the status is polled.
+3. Use **Save label** on individual discovered hosts, or **Add a known host** to
+   enter an IP and role that Nmap couldn't reach. Labels survive rescans.
+4. Open a PCAP, then check one or more inventories (maximum four) in **Network
+   inventory context for AI**. Both **Ask AI** and **Generate AI report** use
+   only the maps you've explicitly checked. Uncheck them for PCAP-only analysis.
+
+The Docker image includes Alpine's `nmap`, `nmap-nselibs` and `nmap-scripts`
+packages. Both NSE data packages are needed for `-sV` service detection. The
+Docker build verifies that `nse_main.lua` and `script.db` exist and tests script
+loading. If an earlier image reports **could not locate nse_main.lua**, rebuild
+with `docker compose up -d --build --force-recreate`. Your maps remain in the
+persistent volume; **do not** use `docker compose down -v`.
+
+Scans use unprivileged `nmap -sT -sV --version-light --top-ports 40` (40 common
+TCP ports), with Nmap host discovery by default and an optional `-Pn` switch
+for hosts that do not respond to discovery probes. To limit resource use and
+unintended scans: **one active scan at a time**, **at most 256 addresses per
+scan**, an **8-minute timeout**, private IPv4 RFC1918 targets only, and up to
+25 saved maps. A failed or timed-out scan leaves the previous successful result
+and operator labels untouched. Only scan networks you own or are permitted
+to test. Nmap sends real packets to the target network; it may be visible to
+monitoring/IDS systems and may not work through restrictive firewalls.
+
+**Crucial scope limitation:** Nmap runs *inside the Wirelight Docker container*.
+It discovers reachable addresses from that network vantage point, so it may not
+reach Docker bridges inside a separate LXC guest without routing/firewall
+changes. A missing host is **not** evidence of an absent container or service.
+Nmap cannot reliably identify Docker/LXC/reverse-proxy roles from open ports;
+manual labels and map notes are supplied by you and identified as such to the
+AI. Nmap results may also be older than the capture being inspected.
+
+**Security:** The Wirelight UI does not provide user authentication. Anybody
+who can access its LAN-exposed API can create/delete saved maps and trigger
+bounded scans. Restrict port 8080 to trusted clients with your firewall or
+reverse-proxy authentication, especially when remote captures and AI API
+credentials are configured. No Nmap arguments are built with a shell; subnets
+are validated before invoking Nmap. Nmap inventory names, service banners, and
+notes are passed to the AI only when you select the map and are treated as
+untrusted data.
