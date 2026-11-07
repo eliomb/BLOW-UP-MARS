@@ -12,7 +12,7 @@ async function upload(f) {
   try {
     const j = await api('/api/upload', { method: 'POST', body: f, headers: { 'Content-Type': 'application/octet-stream' } });
     sid = j.id; $('fname').textContent = f.name + (j.truncated ? ' (first 100,000 packets)' : '');
-    $('land').hidden = true; $('dash').hidden = false; $('again').hidden = false; summary(j.stats); $('q').value = ''; search(0);
+    $('land').hidden = true; $('dash').hidden = false; $('again').hidden = false; summary(j.stats); $('q').value = ''; search(0); resetAI();
   } catch (e) { $('err').textContent = e.message; $('drop').firstElementChild.textContent = 'Ask your packet capture a question.'; }
 }
 function summary(s) {
@@ -93,9 +93,128 @@ $('ifs').onclick = guardHk(async () => { msg('Connecting…'); const j = await p
   j.interfaces.forEach(i => { const o = el('option', '', i); o.value = i; s.append(o); }); msg(j.interfaces.length - 1 + ' interfaces found.'); });
 $('start').onclick = guardHk(async () => { const j = await post('/api/live/start', { ...conn(), iface: $('iface').value, filter: $('bpf').value.trim(), seconds: +$('secs').value || 300 });
   sid = j.id; live = true; $('land').hidden = true; $('dash').hidden = false; $('again').hidden = false; $('stop').hidden = false; $('q').value = '';
-  $('fname').textContent = `● Live · ${$('user').value}@${$('host').value} · ${$('iface').value}`; timer = setInterval(poll, 2000); poll(); });
+  resetAI(); $('fname').textContent = `● Live · ${$('user').value}@${$('host').value} · ${$('iface').value}`; timer = setInterval(poll, 2000); poll(); });
 async function poll() { try { const j = await api('/api/live/status?id=' + encodeURIComponent(sid)); summary(j.stats); await search(off);
   if (!j.running) { clearInterval(timer); live = false; $('stop').hidden = true; $('fname').textContent += j.error ? ' · stopped: ' + j.error : ' · finished'; }
   } catch (e) { clearInterval(timer); $('fname').textContent = e.message; } }
 $('stop').onclick = () => post('/api/live/stop', { id: sid });
 $('again').onclick = async () => { if (live) await post('/api/live/stop', { id: sid }).catch(() => {}); location.reload(); };
+
+// ---- LM Studio AI: requests are initiated only by the user ----
+let aiReport = null, aiBusy = false, aiAvailable = false;
+const aiStatus = (message, error = false) => { $('ai-status').textContent = message; $('ai-status').className = error ? 'bad' : ''; };
+function setAIWorking(busy) {
+  aiBusy = busy;
+  $('ai-run').disabled = busy || !aiAvailable;
+  $('ai-ask').disabled = busy || !aiAvailable;
+  $('ai-question').disabled = busy || !aiAvailable;
+}
+function resetAI() {
+  aiReport = null;
+  $('ai-result').hidden = true; $('ai-json').disabled = true; $('ai-md').disabled = true;
+  $('ai-chat').replaceChildren(el('p', 'hint', 'No AI requests have been sent. Ask a question about the loaded capture.'));
+  $('ai-question').value = '';
+  setAIWorking(false);
+  aiStatus('Ready. No AI analysis runs automatically.');
+}
+async function aiConfiguration() {
+  try { const c = await api('/api/ai/config');
+    $('ai-config').textContent = c.enabled ? `Configured: ${c.endpoint} · model: ${c.model} · timeout: ${c.timeout_seconds}s · only metadata aggregates, your questions and chat history are transmitted` : 'AI disabled by server administrator.';
+    aiAvailable = !!c.enabled;
+    setAIWorking(aiBusy);
+  } catch (e) { aiAvailable = false; $('ai-config').textContent = 'AI configuration unavailable: ' + e.message; setAIWorking(false); }
+}
+function addChatMessage(role, message) {
+  const chat = $('ai-chat');
+  if (chat.firstElementChild?.classList.contains('hint')) chat.replaceChildren();
+  const bubble = el('div', 'ai-message ' + role);
+  bubble.append(el('strong', '', role === 'user' ? 'You' : 'AI'), el('p', '', message));
+  chat.append(bubble);
+  chat.scrollTop = chat.scrollHeight;
+}
+async function askAI(event) {
+  event.preventDefault();
+  const question = $('ai-question').value.trim();
+  if (!sid || !question || aiBusy || !aiAvailable) return;
+  $('ai-question').value = '';
+  addChatMessage('user', question);
+  setAIWorking(true);
+  aiStatus('Waiting for LM Studio to answer… Larger local models may need several minutes.');
+  try {
+    const j = await post('/api/ai/ask', { id: sid, question });
+    addChatMessage('assistant', j.answer);
+    aiStatus(`Answer based on ${j.packet_count.toLocaleString()} packets of traffic metadata. AI conclusions are not proof of an incident.`);
+  } catch (e) {
+    $('ai-question').value = question;
+    aiStatus('Could not get AI answer: ' + e.message, true);
+  } finally { setAIWorking(false); $('ai-question').focus(); }
+}
+function aiText(parent, tag, value, className='') { const n = el(tag, className, value); parent.append(n); return n; }
+function renderAI(report) {
+  aiReport = report; $('ai-result').hidden = false; $('ai-json').disabled = false; $('ai-md').disabled = false;
+  const overview = $('ai-overview'); overview.replaceChildren();
+  aiText(overview, 'strong', `Assessment confidence: ${report.confidence || 'low'}`);
+  aiText(overview, 'p', report.summary || 'No summary provided.');
+  const grid = $('ai-findings'); grid.replaceChildren();
+  const names = { normal:'Normal business activity', suspicious:'Suspicious / anomalous behavior', attack:'Potential attacks', vulnerability:'Possible vulnerabilities' };
+  for (const [category, title] of Object.entries(names)) {
+    const box = aiText(grid, 'div', '', 'ai-group ' + category);
+    aiText(box, 'h3', title);
+    const findings = (report.findings || []).filter(x => x.category === category);
+    if (!findings.length) aiText(box, 'p', 'No supported findings in this category.', 'ai-empty');
+    for (const f of findings) {
+      const item = aiText(box, 'div', '', 'ai-item');
+      aiText(item, 'strong', f.title);
+      aiText(item, 'span', (f.severity || 'info') + ' · AI assessment', 'ai-severity');
+      aiText(item, 'p', f.detail);
+      if (f.evidence && f.evidence.length) aiText(item, 'small', 'Evidence: ' + f.evidence.join(' · '));
+      if (f.recommendation) aiText(item, 'p', 'Next action: ' + f.recommendation);
+    }
+  }
+  $('ai-narrative').textContent = report.narrative || 'No further incident narrative.';
+  const steps = $('ai-steps'); steps.replaceChildren();
+  for (const step of report.next_steps || []) aiText(steps, 'li', step);
+  const l = $('ai-limits'); l.replaceChildren();
+  aiText(l, 'p', `${report.assessment_type || 'AI-assisted assessment'} · ${report.generated_utc} · model: ${report.model}`);
+  for (const limitation of report.limitations || []) aiText(l, 'p', '• ' + limitation);
+  aiText(l, 'p', `Observed packets: ${report.evidence?.packet_count ?? '?'} · duration: ${report.evidence?.duration_seconds ?? '?'} seconds`);
+}
+async function runAI() {
+  if (!sid || aiBusy || !aiAvailable) return;
+  setAIWorking(true); aiStatus('Generating optional report through LM Studio… This may take several minutes.');
+  try {
+    const j = await post('/api/ai/analyze', { id: sid });
+    if (!j.report) throw new Error('No assessment returned');
+    renderAI(j.report);
+    aiStatus(`Report completed · ${j.report.evidence.packet_count.toLocaleString()} packets analyzed · ${j.report.generated_utc}`);
+  } catch (e) { aiStatus('Could not generate report: ' + e.message + '. Packet dashboard remains functional.', true); }
+  finally { setAIWorking(false); }
+}
+function downloadAI(filename, content, type) {
+  const blob = new Blob([content], {type}); const u = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = u; a.download = filename; document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(u), 2000);
+}
+function markdownReport(r) {
+  const safe = s => String(s || '').replace(/[\r\n]+/g, ' ').replace(/[<>]/g, '');
+  const lines = ['# Wirelight — AI-assisted network assessment', '', `Generated: ${safe(r.generated_utc)}`,
+    `Model: ${safe(r.model)}`, `Confidence: ${safe(r.confidence)}`, `Packet count: ${r.evidence.packet_count}`,
+    '', '## Executive summary', '', safe(r.summary), '', '## Notes / Findings', ''];
+  const names = {normal:'Normal business activity',suspicious:'Suspicious / anomalous behavior',attack:'Potential attacks',vulnerability:'Possible vulnerabilities'};
+  for (const [category,title] of Object.entries(names)) {
+    lines.push(`### ${title}`, '');
+    const fs = r.findings.filter(f => f.category === category);
+    if (!fs.length) lines.push('No supported findings.', '');
+    for (const f of fs) lines.push(`**${safe(f.title)}** (${safe(f.severity)})`, '', safe(f.detail), '',
+      `Evidence: ${safe((f.evidence || []).join('; '))}`, '', `Recommendation: ${safe(f.recommendation)}`, '');
+  }
+  lines.push('## Incident narrative', '', safe(r.narrative), '', '## Next steps', '', ...r.next_steps.map(x=>'- '+safe(x)),
+    '', '## Limitations', '', ...r.limitations.map(x=>'- '+safe(x)), '',
+    '## Evidence aggregates (metadata only)', '', '```json', JSON.stringify(r.evidence, null, 2), '```', '');
+  return lines.join('\n');
+}
+$('ai-run').onclick = runAI;
+$('ai-form').addEventListener('submit', askAI);
+$('ai-json').onclick = () => aiReport && downloadAI('wirelight-assessment.json', JSON.stringify(aiReport, null, 2), 'application/json');
+$('ai-md').onclick = () => aiReport && downloadAI('wirelight-assessment.md', markdownReport(aiReport), 'text/markdown');
+aiConfiguration();

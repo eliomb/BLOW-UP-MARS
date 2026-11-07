@@ -17,6 +17,20 @@
  <section class="panels"><div class="panel"><h2>Packets over time</h2><svg id="tl" viewBox="0 0 400 80" preserveAspectRatio="none"></svg></div>
  <div class="panel"><h2>Protocols</h2><div id="bar"></div><div id="legend"></div></div>
  <div class="panel"><h2>Top talkers</h2><div id="talk"></div></div></section>
+ <section class="panel ai-panel" id="ai-section" aria-label="AI questions and findings">
+  <div class="ai-heading"><div><h2>✦ Ask AI about this capture</h2><p class="hint">PCAP processing runs locally. LM Studio is contacted only when you ask a question or request a report.</p></div></div>
+  <p id="ai-config" class="hint">Checking LM Studio configuration…</p>
+  <div id="ai-chat" class="ai-chat" role="log" aria-label="AI conversation" aria-live="polite"><p class="hint">Ask about unusual connections, protocols, traffic spikes, or potential attacks. Answers are based on traffic metadata, not payload inspection.</p></div>
+  <form id="ai-form" class="ai-form"><label for="ai-question" class="sr-only">Question about this capture</label>
+   <input id="ai-question" type="text" maxlength="1200" autocomplete="off" placeholder="e.g. Are there signs of port scanning?" required>
+   <button id="ai-ask" class="go" type="submit" disabled>Ask AI</button></form>
+  <p id="ai-status" role="status">Load a capture to ask questions.</p>
+  <div class="ai-heading ai-report-header"><h2>Optional assessment report</h2>
+   <div class="row"><button id="ai-run" disabled>Generate AI report</button><button id="ai-json" disabled>Export JSON</button><button id="ai-md" disabled>Export report</button></div></div>
+  <div id="ai-result" hidden><div id="ai-overview" class="ai-overview"></div><div id="ai-findings" class="ai-grid"></div>
+  <div class="ai-bottom"><div><h3>Incident narrative</h3><p id="ai-narrative"></p></div><div><h3>Recommended next steps</h3><ul id="ai-steps"></ul></div></div>
+  <details><summary>Evidence, limitations and AI provenance</summary><div id="ai-limits"></div></details></div>
+ </section>
  <section class="search"><form id="f"><input id="q" autocomplete="off" maxlength="300" placeholder="Try: dns queries for example.com, or tcp syn to port 443 larger than 1000 bytes"><button>Search</button></form>
  <div id="chips"></div><div id="ex"></div></section>
  <section class="tbl"><div class="meta"><span id="count"></span><span><button id="prev">Prev</button> <button id="next">Next</button></span></div>

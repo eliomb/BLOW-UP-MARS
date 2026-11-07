@@ -8,8 +8,17 @@ services:
     security_opt: ["no-new-privileges:true"]
     tmpfs: ["/tmp:size=16m,noexec,nosuid,nodev"]
     volumes: ["wirelight-data:/data"]   # SSH keys + trusted host keys (only writable location)
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Linux Docker Engine: LM Studio running on Docker host
     environment:
       MAX_UPLOAD_MB: "64"
+      AI_ENABLED: "${AI_ENABLED:-true}"
+      LM_STUDIO_HOST: "${LM_STUDIO_HOST:-host.docker.internal}"
+      LM_STUDIO_PORT: "${LM_STUDIO_PORT:-1234}"
+      LM_STUDIO_SCHEME: "${LM_STUDIO_SCHEME:-http}"
+      LM_STUDIO_MODEL: "${LM_STUDIO_MODEL:-local-model}"
+      LM_STUDIO_TIMEOUT: "${LM_STUDIO_TIMEOUT:-240}"
+      LM_STUDIO_API_KEY: "${LM_STUDIO_API_KEY:-}"
     mem_limit: 1g
     pids_limit: 128
     cpus: 1.5

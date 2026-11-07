@@ -1,7 +1,7 @@
 import collections, json, os, secrets, threading, time, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
-import nlq, pcap, ssh
+import nlq, pcap, ssh, ai
 
 MAX_UP = int(os.environ.get('MAX_UPLOAD_MB', '64')) * 2 ** 20
 TTL, MAX_SESS = 1800, 4
@@ -62,6 +62,8 @@ class H(BaseHTTPRequestHandler):
         if self.denied(): return self.out(403, {'error': 'Forbidden'})
         try: fn()
         except subprocess.TimeoutExpired: self.out(504, {'error': 'Timed out talking to the remote host'})
+        except ai.ModelTimeout as e: self.out(504, {'error': str(e)})
+        except (ai.ModelUnavailable, ai.ModelBadResponse) as e: self.out(502, {'error': str(e)})
         except (ValueError, IndexError, KeyError) as e: self.out(400, {'error': str(e) or 'Bad request'})
         except Exception: self.out(500, {'error': 'Internal error'})
 
@@ -73,6 +75,10 @@ class H(BaseHTTPRequestHandler):
         if u.path in FILES: return self.out(200, *FILES[u.path])
         if u.path == '/healthz': return self.out(200, {'ok': True})
         if u.path == '/api/keys': return self.out(200, {'keys': ssh.keys()})
+        if u.path == '/api/ai/config':
+            cfg = ai.config()
+            return self.out(200, {'enabled': cfg['enabled'], 'endpoint': f"{cfg['scheme']}://{cfg['host']}:{cfg['port']}",
+                                  'model': cfg['model'], 'timeout_seconds': cfg['timeout']})
         s = session(q.get('id', ''))
         if not s: return self.out(404, {'error': 'Session expired. Start again.'})
         pk = s['pk'][:]
@@ -88,6 +94,10 @@ class H(BaseHTTPRequestHandler):
             if not 0 <= i < len(pk): raise IndexError('No such packet')
             p = pk[i]
             return self.out(200, dict(p={k: p[k] for k in ('n', 'ts', 'len', 'src', 'dst', 'sport', 'dport', 'tr', 'proto', 'flags', 'info')}, hex=pcap.hexdump(s['raw'][i])))
+        if u.path == '/api/ai/report':
+            return self.out(200, {'report': s.get('ai_report'), 'packet_count': len(pk)})
+        if u.path == '/api/ai/chat':
+            return self.out(200, {'messages': s.get('ai_chat', []), 'packet_count': len(pk)})
         if u.path == '/api/live/status':
             L = s.get('live') or {}
             return self.out(200, dict(running=bool(L.get('running')), error=L.get('error', ''), stats=stats(pk)))
@@ -108,6 +118,31 @@ class H(BaseHTTPRequestHandler):
             sid, _ = new_session(pk, [r[3][:pcap.SNAP] for r in recs])
             return self.out(200, dict(id=sid, stats=stats(pk), truncated=len(recs) >= pcap.MAXPKT))
         b = self.jbody()
+        if p in ('/api/ai/analyze', '/api/ai/ask'):
+            s = session(str(b.get('id', '')))
+            if not s: return self.out(404, {'error': 'Session expired. Start again.'})
+            question = b.get('question', '')
+            if p == '/api/ai/ask' and (not isinstance(question, str) or not question.strip() or len(question.strip()) > ai.MAX_QUESTION):
+                raise ValueError(f'Enter a question (1–{ai.MAX_QUESTION} characters)')
+            with LOCK:
+                if s.get('ai_busy'): return self.out(409, {'error': 'Another AI request is still running for this capture'})
+                s['ai_busy'] = True
+                packets = s['pk'][:]  # consistent snapshot, never forward raw packet contents
+                history = s.get('ai_chat', [])[:]
+            try:
+                evidence = ai.observe(packets)
+                if p == '/api/ai/analyze':
+                    report = ai.analyze(evidence)
+                    with LOCK: s['ai_report'] = report
+                    return self.out(200, {'report': report})
+                context = dict(evidence, question_specific_aggregates=ai.question_context(packets, question))
+                answer = ai.ask(context, question, history)
+                with LOCK:
+                    s['ai_chat'] = (history + [{'role': 'user', 'content': question.strip()},
+                                               {'role': 'assistant', 'content': answer}])[-12:]
+                return self.out(200, {'answer': answer, 'packet_count': evidence['packet_count']})
+            finally:
+                with LOCK: s['ai_busy'] = False
         if p == '/api/keys': ssh.gen(str(b.get('name', ''))); return self.out(200, {'ok': True})
         if p == '/api/keys/delete': ssh.delete(str(b.get('name', ''))); return self.out(200, {'ok': True})
         if p == '/api/ssh/hostkey': return self.out(200, ssh.hostkey(b))
