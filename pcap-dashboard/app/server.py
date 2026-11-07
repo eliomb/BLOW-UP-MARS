@@ -9,7 +9,8 @@ SESS, LOCK = {}, threading.Lock()
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 FILES = {k: (open(os.path.join(ROOT, f), 'rb').read(), t) for k, (f, t) in {
     '/': ('index.html', 'text/html; charset=utf-8'), '/app.css': ('app.css', 'text/css; charset=utf-8'),
-    '/app.js': ('app.js', 'application/javascript; charset=utf-8')}.items()}
+    '/app.js': ('app.js', 'application/javascript; charset=utf-8'),
+    '/marked.js': ('marked.js', 'application/javascript; charset=utf-8')}.items()}
 SEC = {'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
        'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer',
        'Cache-Control': 'no-store', 'Cross-Origin-Resource-Policy': 'same-origin'}

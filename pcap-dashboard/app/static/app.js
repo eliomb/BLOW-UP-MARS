@@ -128,11 +128,71 @@ async function aiConfiguration() {
     setAIWorking(aiBusy);
   } catch (e) { aiAvailable = false; $('ai-config').textContent = 'AI configuration unavailable: ' + e.message; setAIWorking(false); }
 }
+// Render Markdown returned by AI without trusting the generated HTML. Markdown is
+// parsed by the bundled (offline) Marked library; only explicitly allowed HTML
+// elements are recreated as fresh DOM nodes. No event handlers or styles survive.
+const MD_TAGS = new Set([
+  'P', 'BR', 'STRONG', 'B', 'EM', 'I', 'DEL', 'S', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+  'UL', 'OL', 'LI', 'BLOCKQUOTE', 'PRE', 'CODE', 'HR', 'A', 'TABLE', 'THEAD',
+  'TBODY', 'TR', 'TH', 'TD'
+]);
+const MD_DROP = new Set(['SCRIPT', 'STYLE', 'SVG', 'MATH', 'IFRAME', 'OBJECT', 'EMBED',
+  'FORM', 'INPUT', 'BUTTON', 'VIDEO', 'AUDIO', 'IMG', 'PICTURE', 'TEMPLATE']);
+const escapeMarkdownHTML = text => String(text).replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+function appendSafeMarkdownNode(parent, node) {
+  if (node.nodeType === Node.TEXT_NODE) { parent.append(document.createTextNode(node.textContent)); return; }
+  if (node.nodeType !== Node.ELEMENT_NODE) return;
+  const tag = node.tagName.toUpperCase();
+  if (MD_DROP.has(tag)) return;
+  if (!MD_TAGS.has(tag)) {
+    for (const child of Array.from(node.childNodes)) appendSafeMarkdownNode(parent, child);
+    return;
+  }
+  const safe = document.createElement(tag.toLowerCase());
+  if (tag === 'A') {
+    const href = (node.getAttribute('href') || '').trim();
+    // Only explicitly written HTTPS/HTTP links are clickable. Prevent javascript:,
+    // data:, protocol-relative links, and escape sequences from becoming URLs.
+    if (!/^https?:\/\//i.test(href)) {
+      for (const child of Array.from(node.childNodes)) appendSafeMarkdownNode(parent, child);
+      return;
+    }
+    try {
+      const target = new URL(href);
+      if (!['https:', 'http:'].includes(target.protocol)) return;
+      safe.href = target.href;
+      safe.target = '_blank';
+      safe.rel = 'noopener noreferrer nofollow';
+    } catch { return; }
+  }
+  for (const child of Array.from(node.childNodes)) appendSafeMarkdownNode(safe, child);
+  parent.append(safe);
+}
+function renderMarkdown(parent, message) {
+  if (typeof marked === 'undefined' || typeof marked.parse !== 'function') {
+    parent.append(el('p', '', message));
+    return;
+  }
+  const renderer = new marked.Renderer();
+  // Ignore model-provided HTML and remote images; AI answers are text/Markdown.
+  renderer.html = raw => escapeMarkdownHTML(raw);
+  renderer.image = (_href, _title, alt) => escapeMarkdownHTML(alt);
+  const html = marked.parse(String(message), {
+    renderer, gfm: true, breaks: true, mangle: false, headerIds: false
+  });
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  for (const child of Array.from(template.content.childNodes)) appendSafeMarkdownNode(parent, child);
+}
 function addChatMessage(role, message) {
   const chat = $('ai-chat');
   if (chat.firstElementChild?.classList.contains('hint')) chat.replaceChildren();
   const bubble = el('div', 'ai-message ' + role);
-  bubble.append(el('strong', '', role === 'user' ? 'You' : 'AI'), el('p', '', message));
+  const body = el('div', 'ai-message-body');
+  if (role === 'assistant') renderMarkdown(body, message);
+  else body.append(el('p', '', message));
+  bubble.append(el('strong', 'ai-message-role', role === 'user' ? 'You' : 'AI'), body);
   chat.append(bubble);
   chat.scrollTop = chat.scrollHeight;
 }

@@ -46,12 +46,32 @@ textarea{flex:1;font-family:ui-monospace,Consolas,monospace;font-size:12px;resiz
 .ai-bottom h3{font-size:13px;color:var(--ac)}.ai-bottom ul{padding-left:18px}#ai-limits{color:var(--mu);line-height:1.65;overflow-wrap:anywhere}
 #ai-result details{margin-top:12px}#ai-result summary{cursor:pointer;color:var(--mu)}
 
-/* On-demand questions and responses; content is always inserted as text, not HTML. */
+/* On-demand AI chat; Markdown is rendered via an allowlisted DOM builder. */
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-.ai-chat{min-height:110px;max-height:370px;overflow-y:auto;background:#131b29;border:1px solid var(--ln);border-radius:9px;padding:14px;margin:16px 0 10px}
+.ai-chat{min-height:110px;max-height:min(560px,70vh);overflow-y:auto;background:#131b29;border:1px solid var(--ln);border-radius:9px;padding:14px;margin:16px 0 10px}
 .ai-chat>.hint{margin:10px 3px;line-height:1.65}
 .ai-message{margin:12px 0;max-width:92%;border:1px solid var(--ln);padding:10px 14px;border-radius:9px;overflow-wrap:anywhere}
-.ai-message strong{font-size:12px;color:var(--ac)}.ai-message p{white-space:pre-wrap;line-height:1.55;margin:6px 0 0}
+.ai-message>.ai-message-role{display:block;font-size:12px;color:var(--ac);margin-bottom:8px}
+.ai-message-body{line-height:1.6;font-size:13px;overflow-wrap:anywhere}
+.ai-message-body>:first-child{margin-top:0}.ai-message-body>:last-child{margin-bottom:0}
+.ai-message-body p{margin:9px 0;white-space:normal}
+.ai-message.user .ai-message-body p{white-space:pre-wrap}
+.ai-message-body h1,.ai-message-body h2,.ai-message-body h3,.ai-message-body h4{color:var(--tx);line-height:1.3;margin:16px 0 8px}
+.ai-message-body h1{font-size:19px}.ai-message-body h2{font-size:17px}.ai-message-body h3{font-size:15px}.ai-message-body h4{font-size:14px}
+.ai-message-body ul,.ai-message-body ol{margin:8px 0 12px;padding-left:25px}
+.ai-message-body li{margin:4px 0;padding-left:2px}.ai-message-body li>p{margin:3px 0}
+.ai-message-body li>ul,.ai-message-body li>ol{margin:4px 0 6px}
+.ai-message-body strong{font-weight:700;color:var(--tx)}
+.ai-message-body em{font-style:italic}.ai-message-body del{opacity:.8}
+.ai-message-body hr{border:0;border-top:1px solid var(--ln);margin:16px 0}
+.ai-message-body code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.92em;background:#101827;color:#dce5ff;padding:2px 5px;border-radius:4px}
+.ai-message-body pre{margin:11px 0;background:#101827;border:1px solid var(--ln);padding:12px;border-radius:7px;overflow-x:auto;white-space:pre}
+.ai-message-body pre code{background:none;padding:0;white-space:pre;font-size:12px}
+.ai-message-body blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid var(--ac);color:var(--mu)}
+.ai-message-body a{color:#9dbbff;text-decoration:underline;text-underline-offset:2px}
+.ai-message-body table{width:100%;border-collapse:collapse;margin:11px 0;font-size:12px;display:block;overflow-x:auto}
+.ai-message-body th,.ai-message-body td{border:1px solid var(--ln);padding:6px 9px;white-space:normal;text-align:left}
+.ai-message-body th{background:#26344a}
 .ai-message.user{margin-left:auto;background:#2b3650}.ai-message.assistant{background:#1c2935}
 .ai-form{display:flex;gap:8px}.ai-form input{flex:1;min-width:0;padding:12px 14px}.ai-form button{flex-shrink:0}
 .ai-report-header{border-top:1px solid var(--ln);padding-top:18px;margin-top:20px;align-items:center}
