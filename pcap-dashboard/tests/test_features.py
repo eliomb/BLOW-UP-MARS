@@ -61,13 +61,14 @@ class Features(unittest.TestCase):
         self.assertEqual(tcp['fields']['Destination port'], 80)
         self.assertIn('0010', detail['hex'])
 
-    def test_packet_text_only_sent_if_explicitly_attached(self):
+    def test_packet_text_automatically_sampled_and_selected_adds_detail(self):
         sid = self.req('/api/upload', capture(sample_frame(b'SECRET-TEST-TOKEN')) )['id']
         with patch.object(server.ai, 'ask', return_value='I see test data.') as mock:
             self.req('/api/ai/ask', {'id': sid, 'question': 'Any issue?'})
             evidence = mock.call_args.args[0]
             self.assertNotIn('explicitly_selected_packet_details', evidence)
-            self.assertNotIn('SECRET-TEST-TOKEN', json.dumps(evidence))
+            self.assertIn('SECRET-TEST-TOKEN', json.dumps(evidence['packet_samples']))
+            self.assertGreaterEqual(evidence['context_scope']['sampled_packets'], 1)
             self.req('/api/ai/ask', {'id': sid, 'question': 'Explain the selected packet', 'packet_numbers':[0]})
             evidence = mock.call_args.args[0]
             self.assertIn('SECRET-TEST-TOKEN', json.dumps(evidence['explicitly_selected_packet_details']))

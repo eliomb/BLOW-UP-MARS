@@ -18,9 +18,9 @@
  <div class="panel"><h2>Protocols</h2><div id="bar"></div><div id="legend"></div></div>
  <div class="panel"><h2>Top talkers</h2><div id="talk"></div></div></section>
  <section class="panel ai-panel" id="ai-section" aria-label="AI questions and findings">
-  <div class="ai-heading"><div><h2>✦ Ask AI about this capture</h2><p class="hint">PCAP processing runs locally. AI is contacted only when you ask a question or request a report. Hosted Mistral receives aggregate metadata and your questions. When you explicitly select a packet, its decoded headers and a short readable payload excerpt are also sent.</p></div></div>
+  <div class="ai-heading"><div><h2>✦ Ask AI about this capture</h2><p class="hint">PCAP processing runs locally. AI is contacted only when you ask a question or request a report. The active model receives packet statistics, correlated attack indicators and automatically sampled packet text (which may include sensitive plaintext). Attaching a packet adds extra detail about that packet.</p></div></div>
   <p id="ai-config" class="hint">Checking AI provider configuration…</p>
-  <div id="ai-chat" class="ai-chat" role="log" aria-label="AI conversation" aria-live="polite"><p class="hint">Ask about unusual connections, protocols, traffic spikes, or potential attacks. Answers use traffic metadata; you can attach a selected packet to inspect its text excerpt.</p></div>
+  <div id="ai-chat" class="ai-chat" role="log" aria-label="AI conversation" aria-live="polite"><p class="hint">Ask about unusual connections, protocols, traffic spikes, or potential attacks. Answers use cross-packet behavior, flows and readable packet examples; select a packet to focus the next question.</p></div>
   <div id="ai-packet-attachment" class="ai-attachment" hidden><span id="ai-packet-label"></span><button id="ai-packet-clear" type="button">Remove packet</button></div>
   <form id="ai-form" class="ai-form"><label for="ai-question" class="sr-only">Question about this capture</label>
    <input id="ai-question" type="text" maxlength="1200" autocomplete="off" placeholder="e.g. Are there signs of port scanning?" required>
@@ -39,7 +39,7 @@
 </div></main>
 <aside id="drawer" hidden><button id="close" aria-label="Close">×</button><h2 id="dt"></h2>
   <button id="packet-ask" class="go">Use packet in AI question</button>
-  <p class="hint">Only clicking this button attaches this packet. With hosted Mistral, packet headers and up to 512 characters of readable payload are sent when you submit the AI question. Payloads may contain private data.</p>
+  <p class="hint">The model already receives representative packet excerpts when asked. This button additionally shares up to 1,600 characters of this specific packet and its header details. Plaintext can contain secrets.</p>
   <dl id="dl"></dl><h3>Decoded protocol layers</h3><div id="packet-layers"></div>
   <h3>Readable packet payload (ASCII preview)</h3><pre id="packet-text"></pre>
   <h3>Packet bytes (hex + ASCII)</h3><pre id="hex"></pre>

@@ -184,7 +184,7 @@ function updatePacketAttachment() {
   const selected = attachedPacket !== null;
   $('ai-packet-attachment').hidden = !selected;
   $('ai-packet-label').textContent = selected
-    ? `Packet #${attachedPacket + 1} attached · headers and up to 512 ASCII payload characters will be shared with the AI when you ask.` : '';
+    ? `Packet #${attachedPacket + 1} attached for extra inspection (up to 1600 plaintext characters). Other representative packets are now included automatically.` : '';
 }
 $('ai-packet-clear').onclick = () => { attachedPacket = null; updatePacketAttachment(); };
 $('packet-ask').onclick = () => {
@@ -217,7 +217,7 @@ async function aiConfiguration() {
     const provider = c.provider === 'mistral' ? 'Mistral AI (cloud)' : 'LM Studio (local)';
     if (!c.enabled) $('ai-config').textContent = 'AI disabled by server administrator.';
     else if (!c.configured) $('ai-config').textContent = 'Mistral AI is selected, but MISTRAL_API_KEY is not set. Configure your .env file and recreate the container. Mistral API access may require billing activation.';
-    else $('ai-config').textContent = `${provider} · model: ${c.model} · timeout: ${c.timeout_seconds}s · ${c.provider === 'mistral' ? 'Your questions and aggregated traffic metadata are sent to Mistral AI. Packet text is sent only when you explicitly attach a packet.' : 'Aggregates and any explicitly selected packet previews are sent to the configured local server.'}`;
+    else $('ai-config').textContent = `${provider} · model: ${c.model} · timeout: ${c.timeout_seconds}s · ${c.provider === 'mistral' ? `Questions, correlated traffic indicators and up to ${c.context_settings?.max_samples ?? 72} representative packet samples (including plaintext payload excerpts) are sent to Mistral. Large captures are summarized, not transferred wholesale.` : `Correlated indicators and up to ${c.context_settings?.max_samples ?? 72} decoded packet samples are shared with the local model.`}`;
     aiAvailable = !!c.enabled && !!c.configured;
     setAIWorking(aiBusy);
   } catch (e) { aiAvailable = false; $('ai-config').textContent = 'AI configuration unavailable: ' + e.message; setAIWorking(false); }
@@ -301,7 +301,7 @@ async function askAI(event) {
   try {
     const j = await post('/api/ai/ask', { id: sid, question, packet_numbers: attachedPacket === null ? [] : [attachedPacket] });
     addChatMessage('assistant', j.answer);
-    aiStatus(`Answer based on ${j.packet_count.toLocaleString()} packets of traffic metadata${attachedPacket === null ? '' : ` and selected packet #${attachedPacket + 1}`}. AI conclusions are not proof of an incident.`);
+    aiStatus(`Answer used statistics across ${j.packet_count.toLocaleString()} packets and ${j.context_scope?.sampled_packets ?? 0} decoded packet samples${attachedPacket === null ? '' : ` plus selected packet #${attachedPacket + 1}`}. Conclusions require corroboration.`);
   } catch (e) {
     $('ai-question').value = question;
     aiStatus('Could not get AI answer: ' + e.message, true);
@@ -344,7 +344,7 @@ async function runAI() {
     const j = await post('/api/ai/analyze', { id: sid });
     if (!j.report) throw new Error('No assessment returned');
     renderAI(j.report);
-    aiStatus(`Report completed · ${j.report.evidence.packet_count.toLocaleString()} packets analyzed · ${j.report.generated_utc}`);
+    aiStatus(`Report completed · ${j.report.evidence.packet_count.toLocaleString()} packet records correlated · ${j.context_scope?.sampled_packets ?? 0} packet examples sent · ${j.report.generated_utc}`);
   } catch (e) { aiStatus('Could not generate report: ' + e.message + '. Packet dashboard remains functional.', true); }
   finally { setAIWorking(false); }
 }
@@ -368,7 +368,7 @@ function markdownReport(r) {
   }
   lines.push('## Incident narrative', '', safe(r.narrative), '', '## Next steps', '', ...r.next_steps.map(x=>'- '+safe(x)),
     '', '## Limitations', '', ...r.limitations.map(x=>'- '+safe(x)), '',
-    '## Evidence aggregates (metadata only)', '', '```json', JSON.stringify(r.evidence, null, 2), '```', '');
+    '## Capture evidence (aggregates, correlations, representative packet excerpts)', '', '```json', JSON.stringify(r.evidence, null, 2), '```', '');
   return lines.join('\n');
 }
 $('ai-run').onclick = runAI;

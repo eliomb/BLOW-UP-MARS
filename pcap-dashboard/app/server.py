@@ -1,7 +1,7 @@
 import collections, json, os, secrets, threading, time, subprocess, struct, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
-import nlq, pcap, ssh, ai
+import nlq, pcap, ssh, ai, evidence
 
 MAX_UP = max(1, min(512, int(os.environ.get('MAX_UPLOAD_MB', '256')))) * 2 ** 20
 TTL, MAX_SESS = 1800, 4
@@ -80,7 +80,8 @@ class H(BaseHTTPRequestHandler):
             cfg = ai.config()
             return self.out(200, {'enabled': cfg['enabled'], 'configured': cfg['configured'],
                                   'provider': cfg['provider'], 'endpoint': cfg['endpoint'],
-                                  'model': cfg['model'], 'timeout_seconds': cfg['timeout']})
+                                  'model': cfg['model'], 'timeout_seconds': cfg['timeout'],
+                                  'context_settings': evidence.options()})
         s = session(q.get('id', ''))
         if not s: return self.out(404, {'error': 'Session expired. Start again.'})
         pk = s['pk'][:]
@@ -170,26 +171,23 @@ class H(BaseHTTPRequestHandler):
             with LOCK:
                 if s.get('ai_busy'): return self.out(409, {'error': 'Another AI request is still running for this capture'})
                 s['ai_busy'] = True
-                packets = s['pk'][:]  # consistent snapshot for aggregates
-                inspected = []
-                if p == '/api/ai/ask':
-                    for n in dict.fromkeys(numbers):
-                        if not 0 <= n < len(s['pk']): raise IndexError('Invalid selected packet')
-                        inspected.append(ai.packet_context(s['pk'][n], s['raw'][n]))
+                packets = s['pk'][:]
+                raws = s['raw'][:]
                 history = s.get('ai_chat', [])[:]
             try:
-                evidence = ai.observe(packets)
+                context = evidence.build(packets, raws,
+                                         question if p == '/api/ai/ask' else '',
+                                         numbers if p == '/api/ai/ask' else [])
                 if p == '/api/ai/analyze':
-                    report = ai.analyze(evidence)
+                    report = ai.analyze(context)
                     with LOCK: s['ai_report'] = report
-                    return self.out(200, {'report': report})
-                context = dict(evidence, question_specific_aggregates=ai.question_context(packets, question))
-                if inspected: context['explicitly_selected_packet_details'] = inspected
+                    return self.out(200, {'report': report, 'context_scope': context['context_scope']})
                 answer = ai.ask(context, question, history)
                 with LOCK:
                     s['ai_chat'] = (history + [{'role': 'user', 'content': question.strip()},
                                                {'role': 'assistant', 'content': answer}])[-12:]
-                return self.out(200, {'answer': answer, 'packet_count': evidence['packet_count']})
+                return self.out(200, {'answer': answer, 'packet_count': len(packets),
+                                      'context_scope': context['context_scope']})
             finally:
                 with LOCK: s['ai_busy'] = False
         if p == '/api/keys': ssh.gen(str(b.get('name', ''))); return self.out(200, {'ok': True})
