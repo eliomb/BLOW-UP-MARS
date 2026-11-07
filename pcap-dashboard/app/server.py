@@ -1,9 +1,9 @@
-import collections, json, os, secrets, threading, time, subprocess
+import collections, json, os, secrets, threading, time, subprocess, struct, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 import nlq, pcap, ssh, ai
 
-MAX_UP = int(os.environ.get('MAX_UPLOAD_MB', '64')) * 2 ** 20
+MAX_UP = max(1, min(512, int(os.environ.get('MAX_UPLOAD_MB', '256')))) * 2 ** 20
 TTL, MAX_SESS = 1800, 4
 SESS, LOCK = {}, threading.Lock()
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
@@ -74,6 +74,7 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path); q = {k: v[0] for k, v in parse_qs(u.query).items()}
         if u.path in FILES: return self.out(200, *FILES[u.path])
         if u.path == '/healthz': return self.out(200, {'ok': True})
+        if u.path == '/api/upload/config': return self.out(200, {'max_bytes': MAX_UP})
         if u.path == '/api/keys': return self.out(200, {'keys': ssh.keys()})
         if u.path == '/api/ai/config':
             cfg = ai.config()
@@ -94,7 +95,34 @@ class H(BaseHTTPRequestHandler):
             i = int(q.get('n', -1))
             if not 0 <= i < len(pk): raise IndexError('No such packet')
             p = pk[i]
-            return self.out(200, dict(p={k: p[k] for k in ('n', 'ts', 'len', 'src', 'dst', 'sport', 'dport', 'tr', 'proto', 'flags', 'info')}, hex=pcap.hexdump(s['raw'][i])))
+            frame = s['raw'][i][:8192]
+            return self.out(200, dict(p={k: p[k] for k in ('n', 'ts', 'len', 'src', 'dst', 'sport', 'dport', 'tr', 'proto', 'flags', 'info')},
+                                      decoded=pcap.packet_layers(frame, p.get('link', 1)),
+                                      captured_bytes=len(s['raw'][i]), inspected_bytes=len(frame),
+                                      hex=pcap.hexdump(frame)))
+        if u.path == '/api/live/download':
+            if not s.get('live'):
+                return self.out(400, {'error': 'Download is available for remote captures only'})
+            with LOCK:
+                pairs = list(zip(s['pk'], s['raw']))
+            if not pairs:
+                return self.out(400, {'error': 'No remote packets captured yet'})
+            link = pairs[0][0].get('link', 1)
+            if any(p.get('link', 1) != link for p, _ in pairs):
+                return self.out(409, {'error': 'Multiple link types cannot be exported to classic PCAP'})
+            size = 24 + sum(16 + len(raw) for _, raw in pairs)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/vnd.tcpdump.pcap')
+            self.send_header('Content-Length', str(size))
+            self.send_header('Content-Disposition', 'attachment; filename="wirelight-remote-capture.pcap"')
+            for key, val in SEC.items(): self.send_header(key, val)
+            self.end_headers()
+            try:
+                self.wfile.write(pcap.pcap_header(link))
+                for p, raw in pairs:
+                    self.wfile.write(pcap.pcap_record(p['ts'], raw, p['len']))
+            except (BrokenPipeError, ConnectionResetError): pass
+            return
         if u.path == '/api/ai/report':
             return self.out(200, {'report': s.get('ai_report'), 'packet_count': len(pk)})
         if u.path == '/api/ai/chat':
@@ -109,26 +137,45 @@ class H(BaseHTTPRequestHandler):
         if p == '/api/upload':
             try: n = int(self.headers.get('Content-Length', ''))
             except ValueError: return self.out(411, {'error': 'Content-Length required'})
-            if not 0 < n <= MAX_UP: return self.out(413, {'error': f'File must be under {MAX_UP >> 20} MB'})
-            data = self.rfile.read(n)
+            if not 0 < n <= MAX_UP:
+                return self.out(413, {'error': f'File must be under {MAX_UP >> 20} MB. Change MAX_UPLOAD_MB if needed.'})
+            reader = pcap.CaptureReader()
+            pk, raw = [], []
+            remaining = n
             try:
-                recs = pcap.read(data)
-                if not recs: raise ValueError('No packets found in file')
-            except Exception as e: return self.out(400, {'error': str(e) if isinstance(e, ValueError) else 'Could not parse file'})
-            pk = [pcap.dissect(i, r) for i, r in enumerate(recs)]
-            sid, _ = new_session(pk, [r[3][:pcap.SNAP] for r in recs])
-            return self.out(200, dict(id=sid, stats=stats(pk), truncated=len(recs) >= pcap.MAXPKT))
+                while remaining:
+                    chunk = self.rfile.read(min(128 * 1024, remaining))
+                    if not chunk: raise ValueError('Upload interrupted before file was received')
+                    remaining -= len(chunk)
+                    for rec in reader.feed(chunk):
+                        pk.append(pcap.dissect(len(pk), rec))
+                        pk[-1]['link'] = rec[2]
+                        raw.append(rec[3][:pcap.SNAP])
+                if not pk: raise ValueError('No packets found in file')
+            except ValueError as e:
+                return self.out(400, {'error': str(e)})
+            sid, _ = new_session(pk, raw)
+            return self.out(200, dict(id=sid, stats=stats(pk),
+                                      truncated=len(pk) >= pcap.MAXPKT))
         b = self.jbody()
         if p in ('/api/ai/analyze', '/api/ai/ask'):
             s = session(str(b.get('id', '')))
             if not s: return self.out(404, {'error': 'Session expired. Start again.'})
             question = b.get('question', '')
+            numbers = b.get('packet_numbers', []) if p == '/api/ai/ask' else []
+            if not isinstance(numbers, list) or len(numbers) > 3 or any(type(x) is not int for x in numbers):
+                raise ValueError('Select up to three packet numbers to share with AI')
             if p == '/api/ai/ask' and (not isinstance(question, str) or not question.strip() or len(question.strip()) > ai.MAX_QUESTION):
                 raise ValueError(f'Enter a question (1–{ai.MAX_QUESTION} characters)')
             with LOCK:
                 if s.get('ai_busy'): return self.out(409, {'error': 'Another AI request is still running for this capture'})
                 s['ai_busy'] = True
-                packets = s['pk'][:]  # consistent snapshot, never forward raw packet contents
+                packets = s['pk'][:]  # consistent snapshot for aggregates
+                inspected = []
+                if p == '/api/ai/ask':
+                    for n in dict.fromkeys(numbers):
+                        if not 0 <= n < len(s['pk']): raise IndexError('Invalid selected packet')
+                        inspected.append(ai.packet_context(s['pk'][n], s['raw'][n]))
                 history = s.get('ai_chat', [])[:]
             try:
                 evidence = ai.observe(packets)
@@ -137,6 +184,7 @@ class H(BaseHTTPRequestHandler):
                     with LOCK: s['ai_report'] = report
                     return self.out(200, {'report': report})
                 context = dict(evidence, question_specific_aggregates=ai.question_context(packets, question))
+                if inspected: context['explicitly_selected_packet_details'] = inspected
                 answer = ai.ask(context, question, history)
                 with LOCK:
                     s['ai_chat'] = (history + [{'role': 'user', 'content': question.strip()},

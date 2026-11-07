@@ -11,7 +11,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway" # Optional LM Studio on Docker host (local mode)
     environment:
-      MAX_UPLOAD_MB: "64"
+      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-256}"
+      MAX_REMOTE_CAPTURE_MB: "${MAX_REMOTE_CAPTURE_MB:-128}"
       AI_ENABLED: "${AI_ENABLED:-true}"
       AI_PROVIDER: "${AI_PROVIDER:-mistral}"
       MISTRAL_API_KEY: "${MISTRAL_API_KEY:-}"

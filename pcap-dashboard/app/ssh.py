@@ -5,6 +5,7 @@ import os, re, select, shlex, shutil, subprocess, tempfile, secrets, threading, 
 import pcap
 
 DATA = os.environ.get('DATA_DIR', '/data')
+MAX_REMOTE_BYTES = max(1, min(512, int(os.environ.get('MAX_REMOTE_CAPTURE_MB', '128')))) * 1024 * 1024
 KEYS, KNOWN = os.path.join(DATA, 'keys'), os.path.join(DATA, 'known_hosts')
 ENV = {'PATH': '/usr/bin:/bin', 'HOME': DATA, 'LANG': 'C'}
 NAME, HOST = re.compile(r'[a-z0-9][a-z0-9_-]{0,31}'), re.compile(r'[A-Za-z0-9][A-Za-z0-9.:-]{0,252}')
@@ -103,7 +104,7 @@ def live(s, c, iface, flt, secs):
     t = (['sudo', '-n'] if c['sudo'] else []) + ['tcpdump', '-i', iface, '-U', '-n', '-s', '0', '-w', '-', f]
     remote = 'sh -c ' + shlex.quote(WRAP) + ' sh ' + ' '.join(shlex.quote(x) for x in t)
     p = subprocess.Popen(cmd(c, remote), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV)
-    s['live'] = dict(running=True, stop=False, error='', proc=p)
+    s['live'] = dict(running=True, stop=False, error='', proc=p, bytes_saved=0)
     threading.Thread(target=_pump, args=(s, min(max(secs, 10), 3600)), daemon=True).start()
 
 def _pump(s, secs):
@@ -114,7 +115,15 @@ def _pump(s, secs):
                 d = os.read(p.stdout.fileno(), 65536)
                 if not d: break
                 for r in sp.feed(d):
-                    s['raw'].append(r[3][:pcap.SNAP]); s['pk'].append(pcap.dissect(len(s['pk']), r))
+                    if L['bytes_saved'] + len(r[3]) > MAX_REMOTE_BYTES:
+                        L['error'] = f'Remote capture reached its {MAX_REMOTE_BYTES // (1024 * 1024)} MB download memory limit; download saved packets.'
+                        L['stop'] = True
+                        break
+                    # Keep full remote frame bytes so exported PCAPs are not silently truncated.
+                    L['bytes_saved'] += len(r[3])
+                    packet = pcap.dissect(len(s['pk']), r)
+                    packet['link'] = r[2]
+                    s['raw'].append(r[3]); s['pk'].append(packet)
     except ValueError: L['error'] = 'remote did not send a valid pcap stream'
     finally:
         early = not L['stop'] and time.time() < end and len(s['pk']) < pcap.MAXPKT

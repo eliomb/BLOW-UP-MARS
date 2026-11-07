@@ -77,3 +77,20 @@ textarea{flex:1;font-family:ui-monospace,Consolas,monospace;font-size:12px;resiz
 .ai-report-header{border-top:1px solid var(--ln);padding-top:18px;margin-top:20px;align-items:center}
 .ai-report-header h2{font-size:15px;color:var(--mu);margin:0}
 #ai-status.bad{color:#f08a7a}
+
+/* Readable Wireshark-style packet inspection */
+#drawer{width:min(700px,100%)}
+#drawer h3{color:var(--ac);font-size:13px;font-weight:650;margin:22px 0 9px}
+#packet-ask{margin:0 0 7px}
+#drawer .hint{line-height:1.5}
+#packet-layers{display:grid;gap:7px}
+.packet-layer{background:#131b29;border:1px solid var(--ln);border-radius:8px;padding:10px 12px}
+.packet-layer>summary{cursor:pointer;color:#cfdcf5;font-weight:600;font-size:13px}
+.packet-layer dl{margin:12px 0 4px;grid-template-columns:minmax(120px,32%) minmax(0,1fr);font-size:12px;line-height:1.5}
+.packet-layer dd{white-space:pre-wrap;overflow-wrap:anywhere}
+#packet-text{white-space:pre-wrap;overflow-wrap:anywhere;max-height:330px;overflow-y:auto}
+#hex{max-height:450px;overflow-y:auto;overflow-x:auto}
+.ai-attachment{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0;background:#2c3445;border:1px solid #6b6b52;border-radius:8px;padding:8px 12px;color:#f1d6a3;font-size:12.5px;line-height:1.5}
+.ai-attachment button{flex-shrink:0}
+@media(max-width:650px){main{padding:14px}#drawer{padding:16px}#drop{padding:35px 15px}.ai-attachment{flex-wrap:wrap}}
+.ai-attachment[hidden]{display:none}

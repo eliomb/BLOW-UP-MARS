@@ -111,3 +111,214 @@ class Stream:
             if len(s.buf) < 16 + cl: break
             out.append((sec + f / s.res, ol, s.link, bytes(s.buf[16:16 + cl]))); del s.buf[:16 + cl]
         return out
+
+class CaptureReader:
+    """Incrementally read classic pcap or pcapng without buffering the whole upload.
+
+    feed() returns bounded individual records. Callers can discard records after MAXPKT,
+    but should keep draining the HTTP body so keep-alive connections stay usable.
+    """
+    def __init__(self):
+        self.buf = bytearray()
+        self.kind = None
+        self.stream = Stream()
+        self.endian = '<'
+        self.interfaces = []
+        self.total = 0
+
+    def feed(self, data):
+        if self.total >= MAXPKT:
+            return []
+        if self.kind == 'pcap':
+            result = self.stream.feed(data)
+            self.total += len(result)
+            return result[:max(0, MAXPKT - (self.total - len(result)))]
+        self.buf.extend(data)
+        if self.kind is None:
+            if len(self.buf) < 4:
+                return []
+            magic = bytes(self.buf[:4])
+            if magic in FM:
+                self.kind = 'pcap'
+                data = bytes(self.buf)
+                self.buf.clear()
+                return self.feed(data)
+            if magic != b'\x0a\x0d\x0d\x0a':
+                raise ValueError('Unsupported file: expected pcap or pcapng')
+            self.kind = 'pcapng'
+        result = []
+        while len(self.buf) >= 12:
+            if self.buf[:4] == b'\x0a\x0d\x0d\x0a':
+                bom = bytes(self.buf[8:12])
+                if bom == b'\x4d\x3c\x2b\x1a': self.endian = '<'
+                elif bom == b'\x1a\x2b\x3c\x4d': self.endian = '>'
+                else: raise ValueError('Invalid pcapng byte-order magic')
+                self.interfaces = []
+            e = self.endian
+            typ, n = struct.unpack_from(e + 'II', self.buf)
+            if n < 12 or n % 4 or n > 16 * 1024 * 1024:
+                raise ValueError('Invalid pcapng block length')
+            if len(self.buf) < n:
+                break
+            block = bytes(self.buf[8:n-4])
+            if struct.unpack(e + 'I', self.buf[n-4:n])[0] != n:
+                raise ValueError('Invalid pcapng block trailer')
+            del self.buf[:n]
+            if typ == 1 and len(block) >= 8:
+                res, pos = 1e6, 8
+                while pos + 4 <= len(block):
+                    code, size = struct.unpack_from(e + 'HH', block, pos)
+                    if code == 0: break
+                    if code == 9 and size >= 1 and pos + 5 <= len(block):
+                        v = block[pos + 4]
+                        res = float(2 ** (v & 127) if v & 128 else 10 ** v)
+                    pos += 4 + ((size + 3) & ~3)
+                self.interfaces.append((struct.unpack_from(e + 'H', block)[0], res))
+            elif typ == 6 and len(block) >= 20:
+                iface, high, low, captured, original = struct.unpack_from(e + 'IIIII', block)
+                if iface < len(self.interfaces) and captured <= 262144 and captured <= len(block) - 20:
+                    link, res = self.interfaces[iface]
+                    result.append(((high << 32 | low) / res, original, link, block[20:20+captured]))
+                    self.total += 1
+                    if self.total >= MAXPKT: break
+            elif typ == 3 and len(block) >= 4 and self.interfaces:
+                original = struct.unpack_from(e + 'I', block)[0]
+                result.append((0.0, original, self.interfaces[0][0], block[4:4+min(original, len(block)-4)]))
+                self.total += 1
+                if self.total >= MAXPKT: break
+        return result
+
+
+def packet_layers(frame, link=1):
+    """A bounded, Wireshark-style textual decode of common packet headers.
+
+    The caller controls how much of `frame` is made available for inspection.
+    Unsupported layers are described as raw data rather than guessed at.
+    """
+    layers = []
+    length = len(frame)
+    layers.append({'name': 'Frame', 'fields': {'Captured bytes': length}})
+    data = frame
+    try:
+        et = None
+        if link == 1 and len(data) >= 14:
+            dst, src, et = data[:6].hex(':'), data[6:12].hex(':'), struct.unpack('>H', data[12:14])[0]
+            fields = {'Destination MAC': dst, 'Source MAC': src, 'EtherType': f'0x{et:04x}'}
+            data = data[14:]
+            while et in (0x8100, 0x88a8) and len(data) >= 4:
+                tag, et = struct.unpack('>HH', data[:4])
+                fields['VLAN ID'] = tag & 0xfff
+                fields['EtherType'] = f'0x{et:04x}'
+                data = data[4:]
+            layers.append({'name': 'Ethernet II', 'fields': fields})
+        elif link == 113 and len(data) >= 16:
+            et = struct.unpack('>H', data[14:16])[0]
+            layers.append({'name': 'Linux cooked capture', 'fields': {'EtherType': f'0x{et:04x}'}})
+            data = data[16:]
+        elif link == 276 and len(data) >= 20:
+            et = struct.unpack('>H', data[:2])[0]
+            layers.append({'name': 'Linux cooked capture v2', 'fields': {'EtherType': f'0x{et:04x}'}})
+            data = data[20:]
+        elif link in (12, 14, 101, 228, 229) and data:
+            et = 0x0800 if data[0] >> 4 == 4 else 0x86dd
+        elif link == 0 and len(data) >= 5:
+            data = data[4:]
+            et = 0x0800 if data[0] >> 4 == 4 else 0x86dd
+        else:
+            layers.append({'name': 'Link layer', 'fields': {'DLT': link, 'Note': 'Unsupported or truncated link header'}})
+        protocol = None
+        source_port = destination_port = 0
+        if et == 0x0800 and len(data) >= 20:
+            h = (data[0] & 15) * 4
+            if h < 20 or len(data) < h: raise ValueError('Short IPv4 header')
+            total = struct.unpack('>H', data[2:4])[0]
+            protocol = data[9]
+            frag = struct.unpack('>H', data[6:8])[0]
+            layers.append({'name': 'Internet Protocol Version 4', 'fields': {
+                'Source': socket.inet_ntoa(data[12:16]), 'Destination': socket.inet_ntoa(data[16:20]),
+                'Header length': h, 'Total length': total, 'TTL': data[8], 'Protocol number': protocol,
+                'Identification': f'0x{struct.unpack(">H", data[4:6])[0]:04x}',
+                'Fragment offset': frag & 0x1fff, 'More fragments': bool(frag & 0x2000)}})
+            data = data[h:min(total, len(data))] if total >= h else data[h:]
+            if frag & 0x1fff: protocol = None
+        elif et == 0x86dd and len(data) >= 40:
+            protocol = data[6]
+            length6 = struct.unpack('>H', data[4:6])[0]
+            layers.append({'name': 'Internet Protocol Version 6', 'fields': {
+                'Source': socket.inet_ntop(socket.AF_INET6, data[8:24]),
+                'Destination': socket.inet_ntop(socket.AF_INET6, data[24:40]),
+                'Hop limit': data[7], 'Payload length': length6, 'Next header': protocol}})
+            data = data[40:40+length6]
+            while protocol in (0, 43, 60) and len(data) >= 8:
+                next_header, size = data[0], (data[1] + 1) * 8
+                layers.append({'name': 'IPv6 extension', 'fields': {'Type': protocol, 'Size': size}})
+                protocol, data = next_header, data[size:]
+        elif et == 0x0806 and len(data) >= 28:
+            op = struct.unpack('>H', data[6:8])[0]
+            layers.append({'name': 'Address Resolution Protocol', 'fields': {
+                'Operation': 'request' if op == 1 else 'reply' if op == 2 else op,
+                'Sender MAC': data[8:14].hex(':'), 'Sender IP': socket.inet_ntoa(data[14:18]),
+                'Target MAC': data[18:24].hex(':'), 'Target IP': socket.inet_ntoa(data[24:28])}})
+            data = data[28:]
+        if protocol == 6 and len(data) >= 20:
+            sport, dport, seq, ack = struct.unpack('>HHII', data[:12])
+            source_port, destination_port = sport, dport
+            size = (data[12] >> 4) * 4
+            if size < 20 or len(data) < size: raise ValueError('Short TCP header')
+            flags = data[13]
+            layers.append({'name': 'Transmission Control Protocol', 'fields': {
+                'Source port': sport, 'Destination port': dport, 'Sequence number': seq,
+                'Acknowledgment number': ack, 'Header length': size,
+                'Flags': ''.join(ch for bit, ch in FL if flags & bit) or 'none',
+                'Window size': struct.unpack('>H', data[14:16])[0],
+                'Checksum': f'0x{struct.unpack(">H", data[16:18])[0]:04x}'}})
+            data = data[size:]
+        elif protocol == 17 and len(data) >= 8:
+            sport, dport, size, checksum = struct.unpack('>HHHH', data[:8])
+            source_port, destination_port = sport, dport
+            layers.append({'name': 'User Datagram Protocol', 'fields': {
+                'Source port': sport, 'Destination port': dport, 'Length': size,
+                'Checksum': f'0x{checksum:04x}'}})
+            data = data[8:min(len(data), size)] if size >= 8 else data[8:]
+        elif protocol in (1, 58) and len(data) >= 4:
+            layers.append({'name': 'Internet Control Message Protocol' + (' v6' if protocol == 58 else ''), 'fields': {
+                'Type': data[0], 'Code': data[1], 'Checksum': data[2:4].hex()}})
+            data = data[4:]
+        if 53 in (source_port, destination_port) and len(data) >= 12:
+            dns = data[2:] if protocol == 6 and len(data) >= 14 else data
+            if len(dns) >= 12:
+                tid, flags, qcount, acount = struct.unpack('>HHHH', dns[:8])
+                fields = {'Transaction ID': f'0x{tid:04x}', 'Type': 'response' if flags & 0x8000 else 'query',
+                          'Questions': qcount, 'Answers': acount, 'Return code': flags & 15}
+                # Decode the first uncompressed question safely; compressed
+                # names are deliberately left uninterpreted here.
+                i, labels = 12, []
+                while i < len(dns) and len(labels) < 24 and 0 < dns[i] < 64:
+                    n = dns[i]; i += 1
+                    if i + n > len(dns): break
+                    labels.append(dns[i:i+n].decode('ascii', 'replace')); i += n
+                if labels: fields['Question name'] = '.'.join(labels)[:255]
+                layers.append({'name': 'Domain Name System', 'fields': fields})
+        if data:
+            maybe_text = ''.join(chr(x) if 32 <= x < 127 else ('\n' if x in (10, 13) else '\t' if x == 9 else '.') for x in data[:2048])
+            label = 'Application data'
+            if data.startswith((b'GET ', b'POST ', b'HTTP/', b'HEAD ', b'PUT ', b'DELETE ', b'SSH-')):
+                label = 'Text-based application data'
+            layers.append({'name': label, 'fields': {'Bytes available': len(data), 'Preview': maybe_text[:512]}})
+        else:
+            maybe_text = ''
+        return {'layers': layers, 'payload_text': maybe_text[:2048], 'payload_length': len(data)}
+    except (IndexError, ValueError, OSError, struct.error) as exc:
+        layers.append({'name': 'Decode warning', 'fields': {'Description': str(exc)}})
+        return {'layers': layers, 'payload_text': '', 'payload_length': 0}
+
+
+def pcap_header(link=1, snaplen=262144):
+    return struct.pack('<IHHIIII', 0xa1b2c3d4, 2, 4, 0, 0, snaplen, link)
+
+
+def pcap_record(ts, raw, original_len):
+    sec = int(ts)
+    usec = max(0, round((ts - sec) * 1e6))
+    if usec >= 1000000: sec += 1; usec = 0
+    return struct.pack('<IIII', sec, usec, len(raw), max(len(raw), original_len)) + raw

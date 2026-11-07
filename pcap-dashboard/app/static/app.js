@@ -1,20 +1,48 @@
 'use strict';
 const $ = id => document.getElementById(id), COL = {TCP:'#6c8ef5',UDP:'#4fc4b0',DNS:'#e8b04a',HTTP:'#e07a8c',TLS:'#a98be0',ICMP:'#7fcf6b',ARP:'#d99a5b',ICMPv6:'#7fcf6b',Other:'#8c96ab'};
 const col = p => COL[p] || COL.Other, PAGE = 100;
-let sid = '', off = 0, total = 0;
+let sid = '', off = 0, total = 0, inspectedPacket = null, attachedPacket = null;
 function el(t, c, x) { const e = document.createElement(t); if (c) e.className = c; if (x != null) e.textContent = x; return e; }
 const fmtB = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
 const api = async (u, o = {}) => { o.headers = { 'X-Requested-With': 'wirelight', ...o.headers }; const r = await fetch(u, o), j = await r.json(); if (!r.ok) throw new Error(j.error || 'Request failed'); return j; };
 
 async function upload(f) {
   $('err').textContent = ''; if (!f) return;
-  $('drop').firstElementChild.textContent = 'Reading ' + f.name + '…';
+  $('drop').firstElementChild.textContent = 'Uploading ' + f.name + '…';
+  $('upload-status').textContent = `Uploading ${fmtB(f.size)}…`;
   try {
-    const j = await api('/api/upload', { method: 'POST', body: f, headers: { 'Content-Type': 'application/octet-stream' } });
+    const limits = await api('/api/upload/config');
+    if (f.size > limits.max_bytes) throw new Error(`File is ${fmtB(f.size)}, but the server upload limit is ${fmtB(limits.max_bytes)}. Increase MAX_UPLOAD_MB in .env and recreate Docker.`);
+    // XHR exposes upload progress; the server processes the file incrementally
+    // without buffering it entirely in RAM. There is no client-side timeout.
+    const j = await new Promise((resolve, reject) => {
+      const req = new XMLHttpRequest();
+      req.open('POST', '/api/upload');
+      req.setRequestHeader('X-Requested-With', 'wirelight');
+      req.setRequestHeader('Content-Type', 'application/octet-stream');
+      req.upload.onprogress = e => {
+        if (e.lengthComputable) $('upload-status').textContent = `Uploading ${Math.round(e.loaded / e.total * 100)}% · ${fmtB(e.loaded)} / ${fmtB(e.total)}`;
+      };
+      req.upload.onload = () => { $('upload-status').textContent = 'Upload received. Parsing packets locally…'; };
+      req.onload = () => {
+        let body = {};
+        try { body = JSON.parse(req.responseText); } catch { /* Invalid HTTP response */ }
+        if (req.status >= 200 && req.status < 300) resolve(body);
+        else reject(new Error(body.error || `Upload failed (HTTP ${req.status})`));
+      };
+      req.onerror = () => reject(new Error('Connection lost during upload. Check Docker logs for memory pressure or container restarts.'));
+      req.onabort = () => reject(new Error('Upload canceled.'));
+      req.send(f);
+    });
     sid = j.id; $('fname').textContent = f.name + (j.truncated ? ' (first 100,000 packets)' : '');
-    $('land').hidden = true; $('dash').hidden = false; $('again').hidden = false; summary(j.stats); $('q').value = ''; search(0); resetAI();
-  } catch (e) { $('err').textContent = e.message; $('drop').firstElementChild.textContent = 'Ask your packet capture a question.'; }
+    $('land').hidden = true; $('dash').hidden = false; $('again').hidden = false;
+    $('remote-download').hidden = true; summary(j.stats); $('q').value = ''; search(0); resetAI();
+  } catch (e) {
+    $('err').textContent = e.message;
+    $('drop').firstElementChild.textContent = 'Ask your packet capture a question.';
+  } finally { $('upload-status').textContent = ''; }
 }
+
 function summary(s) {
   const c = $('cards'); c.replaceChildren();
   [['Packets', s.packets.toLocaleString()], ['Data', fmtB(s.bytes)], ['Duration', s.duration.toFixed(2) + ' s'], ['Started', new Date(s.start * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC']]
@@ -47,12 +75,34 @@ async function search(o) {
 async function detail(n) {
   try {
     const j = await api(`/api/packet?id=${encodeURIComponent(sid)}&n=${n}`), p = j.p;
-    $('dt').textContent = `Packet ${p.n + 1} · ${p.proto}`; const dl = $('dl'); dl.replaceChildren();
-    [['Time', new Date(p.ts * 1000).toISOString()], ['Length', p.len + ' bytes'], ['Source', p.src + (p.sport ? ':' + p.sport : '')], ['Destination', p.dst + (p.dport ? ':' + p.dport : '')], ['Transport', p.tr], ['TCP flags', p.flags || '–'], ['Info', p.info]]
+    inspectedPacket = p.n;
+    $('dt').textContent = `Packet ${p.n + 1} · ${p.proto}`;
+    const dl = $('dl'); dl.replaceChildren();
+    [['Time', new Date(p.ts * 1000).toISOString()], ['Length', p.len + ' bytes'],
+      ['Source', p.src + (p.sport ? ':' + p.sport : '')], ['Destination', p.dst + (p.dport ? ':' + p.dport : '')],
+      ['Transport', p.tr], ['TCP flags', p.flags || '–'], ['Info', p.info]]
       .forEach(([k, v]) => dl.append(el('dt', '', k), el('dd', '', v)));
-    $('hex').textContent = j.hex; $('drawer').hidden = false;
+    const layers = $('packet-layers'); layers.replaceChildren();
+    for (const layer of j.decoded?.layers || []) {
+      const details = el('details', 'packet-layer');
+      details.open = true;
+      details.append(el('summary', '', layer.name));
+      const layerFields = el('dl');
+      for (const [key, value] of Object.entries(layer.fields)) {
+        layerFields.append(el('dt', '', key), el('dd', '', String(value)));
+      }
+      details.append(layerFields); layers.append(details);
+    }
+    $('packet-text').textContent = j.decoded?.payload_text || '(No readable application payload in this packet)';
+    $('hex').textContent = j.hex;
+    $('packet-limit').textContent = j.captured_bytes < p.len
+      ? `Only ${j.captured_bytes.toLocaleString()} of ${p.len.toLocaleString()} original bytes were kept for inspection.`
+      : j.inspected_bytes < j.captured_bytes
+        ? `Previewing first ${j.inspected_bytes} of ${j.captured_bytes} bytes.` : '';
+    $('drawer').hidden = false;
   } catch (e) { $('err').textContent = e.message; }
 }
+
 $('drop').onclick = () => $('file').click(); $('drop').addEventListener('keydown', e => { if (e.target === $('drop') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); $('file').click(); } });
 $('file').onchange = e => upload(e.target.files[0]);
 ['dragover', 'dragleave', 'drop'].forEach(t => $('drop').addEventListener(t, e => { e.preventDefault(); $('drop').classList.toggle('over', t === 'dragover'); if (t === 'drop') upload(e.dataTransfer.files[0]); }));
@@ -65,6 +115,18 @@ $('again').onclick = () => { location.reload(); };
 // ---- remote capture ----
 const post = (u, b) => api(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) });
 let live = false, timer = 0, tok = '';
+// Browser-local convenience only: never store SSH keys or credentials here.
+try {
+  const saved = JSON.parse(localStorage.getItem('wirelight-last-ssh') || '{}');
+  if (typeof saved.host === 'string') $('host').value = saved.host.slice(0, 253);
+  if (typeof saved.user === 'string') $('user').value = saved.user.slice(0, 32);
+} catch { /* Storage unavailable or invalid */ }
+function saveSSH() {
+  try { localStorage.setItem('wirelight-last-ssh', JSON.stringify({host:$('host').value.trim(), user:$('user').value.trim()})); }
+  catch { /* Browser storage disabled */ }
+}
+$('host').addEventListener('input', saveSSH);
+$('user').addEventListener('input', saveSSH);
 const msg = (t, bad) => { const m = $('rmsg'); m.textContent = t; m.className = bad ? 'bad' : ''; };
 const guard = fn => async () => { try { await fn(); } catch (e) { msg(e.message, true); } };
 $('t1').onclick = $('t2').onclick = e => { const r = e.target.id === 't2'; $('drop').hidden = r; $('remote').hidden = !r; $('t1').classList.toggle('on', !r); $('t2').classList.toggle('on', r); if (r) guard(loadKeys)(); };
@@ -82,7 +144,7 @@ $('kcopy').onclick = () => navigator.clipboard.writeText($('kcmd').value).then((
 const guardHk = fn => async () => { try { await fn(); } catch (e) {
   if (!/host key/i.test(e.message)) return msg(e.message, true);
   try { const j = await verify(); msg(j.trusted ? 'The stored host key does not match this server. If you expect that (e.g. reinstall), click Forget host and verify again; otherwise do not connect.' : 'This host is not trusted yet. Compare the fingerprint below, click Trust this host, then try again.', j.trusted); } catch (x) { msg(x.message, true); } } };
-const conn = () => ({ host: $('host').value.trim(), port: +$('port').value || 22, user: $('user').value.trim(), key: $('ksel').value, sudo: $('sudo').checked });
+const conn = () => (saveSSH(), { host: $('host').value.trim(), port: +$('port').value || 22, user: $('user').value.trim(), key: $('ksel').value, sudo: $('sudo').checked });
 const verify = async () => { msg('Contacting server…'); const j = await post('/api/ssh/hostkey', conn()); tok = j.token; const h = $('hk'); h.replaceChildren();
   j.fingerprints.forEach(f => h.append(el('div', 'tk', f))); $('trust').hidden = j.trusted;
   msg(j.trusted ? 'Host key already trusted.' : 'Compare with the server (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub), then trust it.'); return j; };
@@ -92,15 +154,47 @@ $('forget').onclick = guard(async () => { await post('/api/ssh/forget', conn());
 $('ifs').onclick = guardHk(async () => { msg('Connecting…'); const j = await post('/api/ssh/interfaces', conn()), s = $('iface'); s.replaceChildren();
   j.interfaces.forEach(i => { const o = el('option', '', i); o.value = i; s.append(o); }); msg(j.interfaces.length - 1 + ' interfaces found.'); });
 $('start').onclick = guardHk(async () => { const j = await post('/api/live/start', { ...conn(), iface: $('iface').value, filter: $('bpf').value.trim(), seconds: +$('secs').value || 300 });
-  sid = j.id; live = true; $('land').hidden = true; $('dash').hidden = false; $('again').hidden = false; $('stop').hidden = false; $('q').value = '';
+  sid = j.id; live = true; $('remote-download').hidden = false; $('land').hidden = true; $('dash').hidden = false; $('again').hidden = false; $('stop').hidden = false; $('q').value = '';
   resetAI(); $('fname').textContent = `● Live · ${$('user').value}@${$('host').value} · ${$('iface').value}`; timer = setInterval(poll, 2000); poll(); });
 async function poll() { try { const j = await api('/api/live/status?id=' + encodeURIComponent(sid)); summary(j.stats); await search(off);
   if (!j.running) { clearInterval(timer); live = false; $('stop').hidden = true; $('fname').textContent += j.error ? ' · stopped: ' + j.error : ' · finished'; }
   } catch (e) { clearInterval(timer); $('fname').textContent = e.message; } }
 $('stop').onclick = () => post('/api/live/stop', { id: sid });
+$('remote-download').onclick = async () => {
+  if (!sid) return;
+  const button = $('remote-download'); button.disabled = true;
+  try {
+    const url = `/api/live/download?id=${encodeURIComponent(sid)}`;
+    // Navigation download avoids buffering the complete PCAP in JavaScript.
+    const req = await fetch(url, {headers:{'X-Requested-With':'wirelight'}});
+    if (!req.ok) { const body = await req.json(); throw new Error(body.error || 'Download failed'); }
+    // Browser fetch uses a Blob; remote PCAPs are capped server-side to bound memory.
+    const blob = await req.blob();
+    const address = URL.createObjectURL(blob);
+    const link = document.createElement('a'); link.href = address;
+    link.download = `wirelight-remote-${new Date().toISOString().replace(/[:.]/g, '-')}.pcap`;
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(address), 10000);
+  } catch (e) { alert(e.message); } finally { button.disabled = false; }
+};
 $('again').onclick = async () => { if (live) await post('/api/live/stop', { id: sid }).catch(() => {}); location.reload(); };
 
 // ---- AI (Mistral cloud or local LM Studio): user-initiated requests only ----
+function updatePacketAttachment() {
+  const selected = attachedPacket !== null;
+  $('ai-packet-attachment').hidden = !selected;
+  $('ai-packet-label').textContent = selected
+    ? `Packet #${attachedPacket + 1} attached · headers and up to 512 ASCII payload characters will be shared with the AI when you ask.` : '';
+}
+$('ai-packet-clear').onclick = () => { attachedPacket = null; updatePacketAttachment(); };
+$('packet-ask').onclick = () => {
+  if (inspectedPacket === null) return;
+  attachedPacket = inspectedPacket; updatePacketAttachment();
+  $('drawer').hidden = true;
+  $('ai-question').value = `Explain packet #${attachedPacket + 1}. What do its headers and readable payload tell us?`;
+  $('ai-question').focus();
+  $('ai-section').scrollIntoView({behavior:'smooth', block:'start'});
+};
 let aiReport = null, aiBusy = false, aiAvailable = false, aiProvider = 'mistral';
 const aiStatus = (message, error = false) => { $('ai-status').textContent = message; $('ai-status').className = error ? 'bad' : ''; };
 function setAIWorking(busy) {
@@ -113,7 +207,7 @@ function resetAI() {
   aiReport = null;
   $('ai-result').hidden = true; $('ai-json').disabled = true; $('ai-md').disabled = true;
   $('ai-chat').replaceChildren(el('p', 'hint', 'No AI requests have been sent. Ask a question about the loaded capture.'));
-  $('ai-question').value = '';
+  $('ai-question').value = ''; attachedPacket = null; inspectedPacket = null; updatePacketAttachment();
   setAIWorking(false);
   aiStatus('Ready. No AI analysis runs automatically.');
 }
@@ -123,7 +217,7 @@ async function aiConfiguration() {
     const provider = c.provider === 'mistral' ? 'Mistral AI (cloud)' : 'LM Studio (local)';
     if (!c.enabled) $('ai-config').textContent = 'AI disabled by server administrator.';
     else if (!c.configured) $('ai-config').textContent = 'Mistral AI is selected, but MISTRAL_API_KEY is not set. Configure your .env file and recreate the container. Mistral API access may require billing activation.';
-    else $('ai-config').textContent = `${provider} · model: ${c.model} · timeout: ${c.timeout_seconds}s · ${c.provider === 'mistral' ? 'Your questions, recent chat, IPs and aggregated traffic metadata are sent to Mistral AI.' : 'Traffic metadata is sent to the configured local server.'}`;
+    else $('ai-config').textContent = `${provider} · model: ${c.model} · timeout: ${c.timeout_seconds}s · ${c.provider === 'mistral' ? 'Your questions and aggregated traffic metadata are sent to Mistral AI. Packet text is sent only when you explicitly attach a packet.' : 'Aggregates and any explicitly selected packet previews are sent to the configured local server.'}`;
     aiAvailable = !!c.enabled && !!c.configured;
     setAIWorking(aiBusy);
   } catch (e) { aiAvailable = false; $('ai-config').textContent = 'AI configuration unavailable: ' + e.message; setAIWorking(false); }
@@ -205,9 +299,9 @@ async function askAI(event) {
   setAIWorking(true);
   aiStatus(aiProvider === 'mistral' ? 'Asking Mistral AI…' : 'Waiting for local LM Studio model…');
   try {
-    const j = await post('/api/ai/ask', { id: sid, question });
+    const j = await post('/api/ai/ask', { id: sid, question, packet_numbers: attachedPacket === null ? [] : [attachedPacket] });
     addChatMessage('assistant', j.answer);
-    aiStatus(`Answer based on ${j.packet_count.toLocaleString()} packets of traffic metadata. AI conclusions are not proof of an incident.`);
+    aiStatus(`Answer based on ${j.packet_count.toLocaleString()} packets of traffic metadata${attachedPacket === null ? '' : ` and selected packet #${attachedPacket + 1}`}. AI conclusions are not proof of an incident.`);
   } catch (e) {
     $('ai-question').value = question;
     aiStatus('Could not get AI answer: ' + e.message, true);
