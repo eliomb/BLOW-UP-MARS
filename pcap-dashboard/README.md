@@ -171,15 +171,33 @@ loading. If an earlier image reports **could not locate nse_main.lua**, rebuild
 with `docker compose up -d --build --force-recreate`. Your maps remain in the
 persistent volume; **do not** use `docker compose down -v`.
 
-Scans use unprivileged `nmap -sT -sV --version-light --top-ports 40` (40 common
-TCP ports), with Nmap host discovery by default and an optional `-Pn` switch
-for hosts that do not respond to discovery probes. To limit resource use and
-unintended scans: **one active scan at a time**, **at most 256 addresses per
-scan**, an **8-minute timeout**, private IPv4 RFC1918 targets only, and up to
-25 saved maps. A failed or timed-out scan leaves the previous successful result
-and operator labels untouched. Only scan networks you own or are permitted
-to test. Nmap sends real packets to the target network; it may be visible to
-monitoring/IDS systems and may not work through restrictive firewalls.
+Choose one of two **manual** scan modes before clicking **Scan / Rescan**:
+
+- **Quick (default):** unprivileged `-sT -sV --version-light --top-ports 40`,
+  normal host discovery, up to 8 minutes. Optionally enable **Skip host discovery
+  (-Pn)** for computers that don't reply to discovery probes.
+- **Aggressive:** automatically enables `-Pn` (every address is probed, even if
+  the host blocks ping), unprivileged TCP connect scanning over approximately
+  1,050 ports including 135/139/445 (RPC/SMB), 3389 (RDP), and 5985/5986
+  (WinRM). It uses stronger service detection and *safe* Nmap NSE discovery
+  scripts (`smb-os-discovery` and `rdp-ntlm-info`) to collect Windows-related
+  clues, if the services respond. Timeout up to **30 minutes**, per-host
+  deadline 90 seconds, max one scan at a time; CPU/network load is bounded.
+  It does **not** scan every one of 65,535 TCP ports or attempt login/exploit.
+
+With `-Pn`, Nmap assumes addresses are up. Wirelight excludes assumed-up hosts
+that show no TCP or link-layer response, so offline/filtered IPs aren't saved as
+positive discoveries. A fully firewalled host may still be missed. Some service
+clues suggest Windows, but are **not proof** of the host OS. Raw-socket OS
+fingerprinting (`-O` / full Nmap `-A`) isn't enabled because the container runs
+unprivileged with Linux capabilities dropped.
+
+To limit resource use and unintended scans: **one active scan at a time**,
+**at most 256 addresses per scan**, private IPv4 RFC1918 targets only, and up
+to 25 saved maps. A failed or timed-out scan leaves the previous successful
+result and operator labels untouched. Only scan networks you own or are
+permitted to test. Nmap sends real packets to the target network; it may be
+visible to monitoring/IDS systems and may not work through restrictive firewalls.
 
 **Crucial scope limitation:** Nmap runs *inside the Wirelight Docker container*.
 It discovers reachable addresses from that network vantage point, so it may not

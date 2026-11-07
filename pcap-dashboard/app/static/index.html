@@ -19,7 +19,13 @@
     <label>Operator topology notes<textarea id="map-edit-notes" rows="3" maxlength="1000"></textarea></label>
     <button>Save description</button></form>
    <p id="map-meta" class="hint"></p>
-   <label class="hint"><input type="checkbox" id="map-pn"> Skip host discovery (-Pn; checks every address, possibly slower)</label>
+   <div class="map-scan-controls">
+    <label for="map-mode">Scan intensity
+     <select id="map-mode"><option value="quick">Quick — 40 popular TCP ports</option><option value="aggressive">Aggressive — wider TCP scan, Windows service clues</option></select>
+    </label>
+    <label class="hint"><input type="checkbox" id="map-pn"> Skip host discovery (-Pn; check hosts that block ping)</label>
+    <p id="map-mode-help" class="hint">Quick scan uses host discovery; -Pn can be enabled separately.</p>
+   </div>
    <div class="row"><button id="map-scan" class="go">Scan / Rescan</button><button id="map-use">Use in PCAP inspection</button><button id="map-delete">Delete map</button></div>
    <p id="map-status" role="status" class="hint"></p>
   </div>

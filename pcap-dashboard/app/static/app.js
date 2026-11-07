@@ -257,6 +257,12 @@ function hostRow(ip, info, label) {
   if (info) {
     const desc = [info.hostnames?.join(', '), info.mac, ...info.ports.map(p => `${p.port}/${p.protocol} ${p.service} ${p.product} ${p.version}`)].filter(Boolean).join(' · ');
     box.append(el('p', 'map-host-ports', desc || 'No open ports identified'));
+    if (info.platform_clues?.length) {
+      const details = el('details', 'map-platform-clues');
+      details.append(el('summary', '', 'SMB / RDP platform clues (not definitive OS identification)'));
+      for (const clue of info.platform_clues) details.append(el('pre', '', `${clue.source}:\n${clue.detail}`));
+      box.append(details);
+    }
   }
   const row = el('div', 'map-host-controls'), role = el('select'), notes = el('input'), save = el('button', '', 'Save label');
   notes.placeholder = 'Host notes (e.g. nested Docker/LXC)'; notes.maxLength = 400;
@@ -274,8 +280,10 @@ async function loadMapDetail() {
   if (currentMap !== id) return;
   const m = res.map; $('map-detail').hidden = false; $('map-host-panel').hidden = false;
   $('map-edit-name').value = m.name; $('map-edit-notes').value = m.notes;
+  $('map-mode').value = m.scan_mode === 'aggressive' ? 'aggressive' : 'quick';
   $('map-pn').checked = !!m.skip_discovery;
-  $('map-meta').textContent = `${m.subnet} · last scanned: ${m.scanned_at || 'never'} · ${m.scan_count} scan(s) · ${m.hosts.length} host(s) in last result`;
+  updateMapMode();
+  $('map-meta').textContent = `${m.subnet} · last scanned: ${m.scanned_at || 'never'} · ${m.scan_count} scan(s) · last mode: ${m.scan_mode || 'quick'} · ${m.hosts.length} responding host(s) in last result`;
   const hosts = $('map-hosts'); hosts.replaceChildren();
   const added = new Set();
   for (const h of m.hosts) { hosts.append(hostRow(h.ip, h, m.labels[h.ip])); added.add(h.ip); }
@@ -288,9 +296,11 @@ async function checkMapScan(id) {
   if (currentMap !== id) return;
   const running = j.status === 'running';
   $('map-scan').disabled = running;
+  $('map-mode').disabled = running;
+  $('map-pn').disabled = running || $('map-mode').value === 'aggressive';
   mapScanNotice(running ? `Scanning… started ${j.started_at}. Results will be saved when complete.` :
     j.status === 'failed' ? `Scan failed: ${j.error} (previous results preserved)` :
-    j.status === 'completed' ? `Scan complete: ${j.host_count} hosts found.` :
+    j.status === 'completed' ? `${j.mode === 'aggressive' ? 'Aggressive' : 'Quick'} scan complete: ${j.host_count} responding host(s) found.` :
     'Ready. Scans run only when you click Scan / Rescan.', j.status === 'failed');
   if (running) {
     clearTimeout(mapTimer);
@@ -304,12 +314,22 @@ async function checkMapScan(id) {
     }, 2500);
   }
 }
+function updateMapMode() {
+  const deep = $('map-mode').value === 'aggressive';
+  $('map-pn').disabled = deep || $('map-scan').disabled;
+  $('map-mode-help').textContent = deep
+    ? 'Aggressive always uses -Pn (no ping): checks about 1,050 TCP ports per address, including SMB, RPC, RDP and WinRM. Uses safe SMB/RDP identification probes, and can take up to 30 minutes for a /24. Only hosts that respond are saved.'
+    : 'Quick scans 40 popular TCP ports (up to 8 minutes). Enable -Pn above if a host blocks discovery probes.';
+}
+$('map-mode').addEventListener('change', updateMapMode);
 $('map-scan').onclick = async () => { if (!currentMap) return;
   const id = currentMap;
   $('map-scan').disabled = true;
-  try { await post('/api/maps/scan', {id, skip_discovery: $('map-pn').checked});
+  $('map-mode').disabled = true;
+  $('map-pn').disabled = true;
+  try { await post('/api/maps/scan', {id, skip_discovery: $('map-pn').checked || $('map-mode').value === 'aggressive', mode: $('map-mode').value});
     mapScanNotice('Starting Nmap scan…'); await checkMapScan(id);
-  } catch(e) { mapScanNotice(e.message, true); $('map-scan').disabled = false; }
+  } catch(e) { mapScanNotice(e.message, true); $('map-scan').disabled = false; $('map-mode').disabled = false; updateMapMode(); }
 };
 // Maps remain opt-in on every AI request, including generated reports.
 loadMaps().catch(() => { /* Network mapping may be unavailable, PCAP viewer continues working. */ });

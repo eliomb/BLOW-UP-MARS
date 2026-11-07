@@ -208,7 +208,7 @@ class H(BaseHTTPRequestHandler):
             networkmap.delete(b.get('id', ''))
             return self.out(200, {'ok': True})
         if p == '/api/maps/scan':
-            return self.out(202, networkmap.start_scan(b.get('id', ''), b.get('skip_discovery', False)))
+            return self.out(202, networkmap.start_scan(b.get('id', ''), b.get('skip_discovery', False), b.get('mode', 'quick')))
         if p in ('/api/ai/analyze', '/api/ai/ask'):
             s = session(str(b.get('id', '')))
             if not s: return self.out(404, {'error': 'Session expired. Start again.'})

@@ -76,6 +76,74 @@ class Inventory(unittest.TestCase):
         networkmap.delete(ident)
         self.assertEqual(networkmap.list_maps(), [])
 
+    def test_aggressive_scan_finds_non_ping_windows_and_ignores_phantom_hosts(self):
+        xml = b'''<nmaprun>
+          <host><status state="up" reason="user-set"/>
+            <address addr="10.0.1.10" addrtype="ipv4"/>
+            <ports><extraports state="filtered" count="1050"/></ports></host>
+          <host><status state="up" reason="user-set"/>
+            <address addr="10.0.1.9" addrtype="ipv4"/>
+            <ports>
+             <port protocol="tcp" portid="445"><state state="open"/>
+              <service name="microsoft-ds" product="Windows SMB"/>
+              <script id="smb-os-discovery" output="OS: Windows Server 2022\nComputer name: LAB-SRV"/>
+             </port>
+             <port protocol="tcp" portid="3389"><state state="open"/>
+              <service name="ms-wbt-server"/>
+              <script id="rdp-ntlm-info" output="Product_Version: 10.0.20348"/>
+             </port>
+            </ports></host>
+          <host><status state="up" reason="user-set"/>
+            <address addr="10.0.1.18" addrtype="ipv4"/>
+            <ports><extraports state="closed" count="1050"/></ports></host>
+          </nmaprun>'''
+        ident = networkmap.create('Windows Lab', '10.0.1.0/24')['id']
+        networkmap.label_host(ident, '10.0.1.10', 'virtual machine', 'manual host survives scan')
+        with patch.object(networkmap.subprocess, 'run', return_value=type('R', (), {
+                'returncode': 0, 'stdout': xml, 'stderr': b''})()) as runner:
+            networkmap.start_scan(ident, mode='aggressive')
+            for _ in range(120):
+                if networkmap.status(ident)['status'] != 'running': break
+                time.sleep(.01)
+            self.assertEqual(networkmap.status(ident)['status'], 'completed')
+            cmd = runner.call_args.args[0]
+            self.assertIn('-Pn', cmd)
+            self.assertIn('-sT', cmd)
+            self.assertIn('smb-os-discovery,rdp-ntlm-info', cmd)
+            self.assertIn('5985', cmd[cmd.index('-p') + 1])
+            self.assertNotIn('-O', cmd)  # preserve unprivileged Docker restrictions
+            self.assertEqual(runner.call_args.kwargs['timeout'], networkmap.AGGRESSIVE_TIMEOUT)
+        m = networkmap.detail(ident)
+        self.assertEqual(m['scan_mode'], 'aggressive')
+        self.assertEqual(m['scan_count'], 1)
+        self.assertTrue(m['skip_discovery'])
+        self.assertEqual([h['ip'] for h in m['hosts']], ['10.0.1.9', '10.0.1.18'])
+        self.assertEqual(m['hosts'][0]['platform_clues'][0]['source'], 'smb-os-discovery')
+        self.assertEqual(m['hosts'][0]['platform_clues'][1]['source'], 'rdp-ntlm-info')
+        self.assertEqual(m['labels']['10.0.1.10']['role'], 'virtual machine')
+        ctx = networkmap.context(ident, [{'src': '10.0.1.9', 'dst': '10.0.1.18'}])
+        self.assertIn('Windows Server 2022', str(next(h for h in ctx['hosts'] if h['ip'] == '10.0.1.9')['platform_clues']))
+        self.assertEqual(ctx['scan_mode'], 'aggressive')
+
+    def test_invalid_scan_mode_does_not_start_scan(self):
+        ident = networkmap.create('Lab', '10.0.1.0/24')['id']
+        with self.assertRaisesRegex(ValueError, 'Invalid scan mode'):
+            networkmap.start_scan(ident, mode='--script=unsafe')
+        self.assertEqual(networkmap.status(ident)['status'], 'idle')
+
+    def test_aggressive_scan_failure_preserves_older_snapshot(self):
+        ident = networkmap.create('Lab', '10.0.1.0/24')['id']
+        with patch.object(networkmap.subprocess, 'run', return_value=type('R', (), {'returncode': 0, 'stdout': XML, 'stderr': b''})()):
+            networkmap.start_scan(ident)
+            while networkmap.status(ident)['status'] == 'running': time.sleep(.01)
+        previous = networkmap.detail(ident)
+        with patch.object(networkmap.subprocess, 'run', side_effect=TimeoutError('slow')):
+            networkmap.start_scan(ident, mode='aggressive')
+            while networkmap.status(ident)['status'] == 'running': time.sleep(.01)
+        # Other OS errors may not always be TimeoutExpired; this assertion
+        # confirms the persisted snapshot regardless of subprocess failure.
+        self.assertEqual(networkmap.detail(ident), previous)
+
     def test_multiple_selected_contexts_are_independent_and_bounded(self):
         one = networkmap.create('LXC hosts', '10.0.1.0/24')['id']
         two = networkmap.create('Docker bridge', '172.25.0.0/24')['id']
