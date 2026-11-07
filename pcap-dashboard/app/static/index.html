@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wirelight · PCAP analysis</title><link rel="stylesheet" href="/app.css"></head><body>
+<header><div class="brand"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M2 11h4l2-7 4 14 2-7h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Wirelight</div><span id="fname"></span><button id="again" hidden>Open another capture</button></header>
+<main>
+<section id="drop" tabindex="0" role="button" aria-label="Choose a capture file"><h1>Ask your packet capture a question.</h1><p>Drop a .pcap or .pcapng file here, or click to choose one. Files are analysed in memory and never written to disk.</p><input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden><p id="err" role="alert"></p></section>
+<div id="dash" hidden>
+ <section id="cards"></section>
+ <section class="panels"><div class="panel"><h2>Packets over time</h2><svg id="tl" viewBox="0 0 400 80" preserveAspectRatio="none"></svg></div>
+ <div class="panel"><h2>Protocols</h2><div id="bar"></div><div id="legend"></div></div>
+ <div class="panel"><h2>Top talkers</h2><div id="talk"></div></div></section>
+ <section class="search"><form id="f"><input id="q" autocomplete="off" maxlength="300" placeholder="Try: dns queries for example.com, or tcp syn to port 443 larger than 1000 bytes"><button>Search</button></form>
+ <div id="chips"></div><div id="ex"></div></section>
+ <section class="tbl"><div class="meta"><span id="count"></span><span><button id="prev">Prev</button> <button id="next">Next</button></span></div>
+ <div class="scroll"><table><thead><tr><th>#</th><th>Time (s)</th><th>Source</th><th>Destination</th><th>Protocol</th><th>Length</th><th>Info</th></tr></thead><tbody id="rows"></tbody></table></div></section>
+</div></main>
+<aside id="drawer" hidden><button id="close" aria-label="Close">×</button><h2 id="dt"></h2><dl id="dl"></dl><pre id="hex"></pre></aside>
+<script src="/app.js"></script></body></html>
