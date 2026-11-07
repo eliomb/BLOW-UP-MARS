@@ -30,14 +30,22 @@ The image is built locally from `python:3.12-alpine` (the only thing pulled from
 
 Terms are combined with AND. The chips under the search box show exactly how your query was interpreted. Click a protocol, host, or packet to drill down.
 
-## Security design
-- Alpine base image, runs in a container with no extra packages installed.
-- Python standard library only: no third-party packages, no shell, no database, no `eval`.
-- Uploads are parsed in memory, never saved; size-capped (`MAX_UPLOAD_MB`), 100k-packet cap, 4 sessions, 30-minute expiry, random 192-bit session IDs.
-- Strict CSP (no inline script/style, no external resources), `nosniff`, no-store, and all UI text rendered with `textContent` (no HTML injection).
-- Query parser is rule-based; user input never becomes code or regex.
+## Remote live capture (over SSH)
+1. **Remote capture** tab → **Generate key** (ed25519). Copy the shown `echo '…' >> ~/.ssh/authorized_keys` command and run it on the server as the SSH user.
+2. Enter user/host/port → **Verify host key**, compare the fingerprint with the server's, then **Trust this host**. Connections use strict host-key checking against that list.
+3. **Load interfaces**, pick one, optionally add a capture filter (BPF, e.g. `host 10.0.0.5`), and **Start capture**. `tcpdump` runs remotely and streams the pcap back over SSH; the dashboard updates every 2 s and all natural-language filters work on the live data. Your own SSH port is excluded automatically.
 
-## Notes
-- Meant for local/analyst use. To expose it beyond localhost, put it behind a TLS reverse proxy with authentication.
-- Dissects Ethernet/VLAN, Linux cooked, raw IP, IPv4/IPv6, TCP, UDP, ICMP, ARP, plus DNS/HTTP/TLS detection. Natural-language IP matching is IPv4 (IPv6 works via quoted text).
-- Layout: `app/pcap.py` (parser), `app/nlq.py` (query engine), `app/server.py` (API), `app/static/` (UI).
+Remote requirements: Linux with `tcpdump`, and either an SSH user that is root, **or** passwordless sudo for tcpdump (tick the box), e.g. in `/etc/sudoers.d/wirelight`:
+`youruser ALL=(root) NOPASSWD: /usr/bin/tcpdump`, **or** `setcap cap_net_raw,cap_net_admin=eip $(which tcpdump)`.
+Captures stop after the time limit (default 300 s, max 3600), at 100,000 packets, on Stop, or when the session expires.
+
+## Security design
+- Container: Alpine, non-root UID 10001, read-only root FS, `cap_drop: ALL`, `no-new-privileges`, noexec tmpfs, CPU/memory/PID limits, published on 127.0.0.1 only. Only `openssh-client` is added; pip is removed.
+- Keys live only in the `wirelight-data` volume (`/data/keys`, dir 0700, files 0600). No API returns a private key; nothing is logged (HTTP logging is disabled, SSH `LogLevel=ERROR`, error text is truncated). Key generation happens in a throwaway tmpfs dir that is deleted immediately. Keys are unencrypted (needed for unattended capture) so protect the Docker volume/host. Delete a key from the UI (or `docker compose down -v` to wipe everything).
+- SSH: argv lists only (no local shell), `BatchMode`, key-only auth, `StrictHostKeyChecking=yes` with a private known_hosts, no agent/port forwarding. Remote arguments are allow-listed and shell-quoted; the remote command is fixed to `ls /sys/class/net` or `tcpdump -w -`.
+- Control API is protected against CSRF and DNS rebinding: Host allow-list (`ALLOWED_HOSTS`, default localhost), Origin check, and a required custom header. Add your hostname to `ALLOWED_HOSTS` if you reach it by another name, and put TLS + auth in front before exposing it beyond localhost.
+- Uploads/captures are held in memory only; size, packet, session (4) and live-capture (2) caps; 30-minute expiry; strict CSP; UI renders text with `textContent`; the query parser never builds code or regexes from input.
+- Python standard library only.
+
+## Layout
+`app/pcap.py` parser · `app/nlq.py` query engine · `app/ssh.py` keys + remote capture · `app/server.py` API · `app/static/` UI.

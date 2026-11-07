@@ -1,8 +1,18 @@
 services:
   wirelight:
     build: .
-    ports:
-      - "127.0.0.1:8080:8080"
-    restart: unless-stopped
+    ports: ["127.0.0.1:8080:8080"]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=16m,noexec,nosuid,nodev"]
+    volumes: ["wirelight-data:/data"]   # SSH keys + trusted host keys (only writable location)
     environment:
       MAX_UPLOAD_MB: "64"
+    mem_limit: 1g
+    pids_limit: 128
+    cpus: 1.5
+    restart: unless-stopped
+volumes:
+  wirelight-data:

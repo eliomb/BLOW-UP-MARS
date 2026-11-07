@@ -1,8 +1,17 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Wirelight · PCAP analysis</title><link rel="stylesheet" href="/app.css"></head><body>
-<header><div class="brand"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M2 11h4l2-7 4 14 2-7h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Wirelight</div><span id="fname"></span><button id="again" hidden>Open another capture</button></header>
+<header><div class="brand"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M2 11h4l2-7 4 14 2-7h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Wirelight</div><span id="fname"></span><button id="stop" hidden>Stop capture</button><button id="again" hidden>Open another capture</button></header>
 <main>
-<section id="drop" tabindex="0" role="button" aria-label="Choose a capture file"><h1>Ask your packet capture a question.</h1><p>Drop a .pcap or .pcapng file here, or click to choose one. Files are analysed in memory and never written to disk.</p><input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden><p id="err" role="alert"></p></section>
+<section id="land"><div class="tabs"><button id="t1" class="on">Upload file</button><button id="t2">Remote capture</button></div>
+<div id="drop" tabindex="0" role="button" aria-label="Choose a capture file"><h1>Ask your packet capture a question.</h1><p>Drop a .pcap or .pcapng file here, or click to choose one. Files are analysed in memory and never written to disk.</p><input id="file" type="file" accept=".pcap,.pcapng,.cap" hidden><p id="err" role="alert"></p></div>
+<div id="remote" hidden>
+ <div class="panel"><h2>1. SSH key</h2><div class="row"><select id="ksel" aria-label="SSH key"></select><button id="kdel">Delete</button><input id="kname" placeholder="new key name" maxlength="32"><button id="kgen">Generate key</button></div>
+ <p class="hint">Run this on the server you want to capture from, as the SSH user. The private key never leaves the container volume.</p><div class="row"><textarea id="kcmd" readonly rows="3"></textarea><button id="kcopy">Copy</button></div><p class="hint" id="kfp"></p></div>
+ <div class="panel"><h2>2. Server</h2><div class="row"><input id="user" placeholder="user" maxlength="32"><input id="host" placeholder="host or IP" maxlength="253"><input id="port" type="number" value="22" min="1" max="65535"></div>
+ <label class="hint"><input type="checkbox" id="sudo"> Use passwordless sudo for tcpdump (unless the user is root)</label>
+ <div class="row"><button id="verify">Verify host key</button><button id="trust" hidden>Trust this host</button><button id="forget">Forget host</button></div><div id="hk"></div></div>
+ <div class="panel"><h2>3. Capture</h2><div class="row"><button id="ifs">Load interfaces</button><select id="iface" aria-label="Interface"></select><input id="bpf" placeholder="capture filter (optional), e.g. host 10.0.0.5" maxlength="200"><input id="secs" type="number" value="300" min="10" max="3600" title="Max seconds"><button id="start" class="go">Start capture</button></div></div>
+ <p id="rmsg" role="status"></p></div></section>
 <div id="dash" hidden>
  <section id="cards"></section>
  <section class="panels"><div class="panel"><h2>Packets over time</h2><svg id="tl" viewBox="0 0 400 80" preserveAspectRatio="none"></svg></div>

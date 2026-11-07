@@ -61,17 +61,21 @@ def dissect(i, rec):
             et = struct.unpack('>H', b[12:14])[0]; b = b[14:]
             while et in (0x8100, 0x88a8): et = struct.unpack('>H', b[2:4])[0]; b = b[4:]
         elif link == 113: et = struct.unpack('>H', b[14:16])[0]; b = b[16:]
-        elif link == 101: et = 0x800 if b[0] >> 4 == 4 else 0x86dd
+        elif link == 276: et = struct.unpack('>H', b[0:2])[0]; b = b[20:]   # Linux cooked v2 (tcpdump -i any on libpcap >= 1.10)
+        elif link in (12, 14, 101, 228, 229): et = 0x800 if b[0] >> 4 == 4 else 0x86dd   # raw IP
         elif link == 0: b = b[4:]; et = 0x800 if b[0] >> 4 == 4 else 0x86dd
+        else: p['info'] = f'Unsupported link type {link}'
         pr = None
         if et == 0x800:
-            pr = b[9]; p['src'], p['dst'] = socket.inet_ntoa(b[12:16]), socket.inet_ntoa(b[16:20]); b = b[(b[0] & 15) * 4:]
+            pr = b[9]; p['src'], p['dst'] = socket.inet_ntoa(b[12:16]), socket.inet_ntoa(b[16:20]); h = (b[0] & 15) * 4; tl = struct.unpack('>H', b[2:4])[0]; b = b[h:tl] if tl >= h else b[h:]
         elif et == 0x86dd:
             pr = b[6]; p['src'], p['dst'] = socket.inet_ntop(socket.AF_INET6, b[8:24]), socket.inet_ntop(socket.AF_INET6, b[24:40]); b = b[40:]
+            while pr in (0, 43, 60): pr = b[0]; b = b[(b[1] + 1) * 8:]   # skip IPv6 extension headers
         elif et == 0x806:
             op = struct.unpack('>H', b[6:8])[0]
             p.update(tr='ARP', proto='ARP', src=socket.inet_ntoa(b[14:18]), dst=socket.inet_ntoa(b[24:28]))
             p['info'] = f"Who has {p['dst']}? Tell {p['src']}" if op == 1 else f"{p['src']} is at {b[8:14].hex(':')}"
+        elif et: p['info'] = f'EtherType 0x{et:04x}'
         if pr in (6, 17):
             p['sport'], p['dport'] = struct.unpack('>HH', b[:4])
             if pr == 6:
@@ -89,3 +93,21 @@ def dissect(i, rec):
 def hexdump(b):
     return '\n'.join(f"{i:04x}  {b[i:i+16].hex(' '):<47}  " + ''.join(chr(x) if 32 <= x < 127 else '.' for x in b[i:i + 16])
                      for i in range(0, len(b), 16))
+
+FM = {b'\xd4\xc3\xb2\xa1': ('<', 1e6), b'\x4d\x3c\xb2\xa1': ('<', 1e9), b'\xa1\xb2\xc3\xd4': ('>', 1e6), b'\xa1\xb2\x3c\x4d': ('>', 1e9)}
+
+class Stream:
+    """Incremental classic-pcap reader for `tcpdump -w -` output."""
+    def __init__(s): s.buf, s.e, s.res, s.link = bytearray(), None, 1e6, 1
+    def feed(s, d):
+        s.buf += d; out = []
+        if s.e is None:
+            if len(s.buf) < 24: return out
+            if bytes(s.buf[:4]) not in FM: raise ValueError('not pcap')
+            s.e, s.res = FM[bytes(s.buf[:4])]; s.link = struct.unpack(s.e + 'I', s.buf[20:24])[0]; del s.buf[:24]
+        while len(s.buf) >= 16:
+            sec, f, cl, ol = struct.unpack(s.e + 'IIII', s.buf[:16])
+            if cl > 262144: raise ValueError('bad record')
+            if len(s.buf) < 16 + cl: break
+            out.append((sec + f / s.res, ol, s.link, bytes(s.buf[16:16 + cl]))); del s.buf[:16 + cl]
+        return out
